@@ -1,0 +1,1243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>body{background-color:white;}</style>
+<script>(function() {
+  // If window.HTMLWidgets is already defined, then use it; otherwise create a
+  // new object. This allows preceding code to set options that affect the
+  // initialization process (though none currently exist).
+  window.HTMLWidgets = window.HTMLWidgets || {};
+
+  // See if we're running in a viewer pane. If not, we're in a web browser.
+  var viewerMode = window.HTMLWidgets.viewerMode =
+      /\bviewer_pane=1\b/.test(window.location);
+
+  // See if we're running in Shiny mode. If not, it's a static document.
+  // Note that static widgets can appear in both Shiny and static modes, but
+  // obviously, Shiny widgets can only appear in Shiny apps/documents.
+  var shinyMode = window.HTMLWidgets.shinyMode =
+      typeof(window.Shiny) !== "undefined" && !!window.Shiny.outputBindings;
+
+  // We can't count on jQuery being available, so we implement our own
+  // version if necessary.
+  function querySelectorAll(scope, selector) {
+    if (typeof(jQuery) !== "undefined" && scope instanceof jQuery) {
+      return scope.find(selector);
+    }
+    if (scope.querySelectorAll) {
+      return scope.querySelectorAll(selector);
+    }
+  }
+
+  function asArray(value) {
+    if (value === null)
+      return [];
+    if ($.isArray(value))
+      return value;
+    return [value];
+  }
+
+  // Implement jQuery's extend
+  function extend(target /*, ... */) {
+    if (arguments.length == 1) {
+      return target;
+    }
+    for (var i = 1; i < arguments.length; i++) {
+      var source = arguments[i];
+      for (var prop in source) {
+        if (source.hasOwnProperty(prop)) {
+          target[prop] = source[prop];
+        }
+      }
+    }
+    return target;
+  }
+
+  // IE8 doesn't support Array.forEach.
+  function forEach(values, callback, thisArg) {
+    if (values.forEach) {
+      values.forEach(callback, thisArg);
+    } else {
+      for (var i = 0; i < values.length; i++) {
+        callback.call(thisArg, values[i], i, values);
+      }
+    }
+  }
+
+  // Replaces the specified method with the return value of funcSource.
+  //
+  // Note that funcSource should not BE the new method, it should be a function
+  // that RETURNS the new method. funcSource receives a single argument that is
+  // the overridden method, it can be called from the new method. The overridden
+  // method can be called like a regular function, it has the target permanently
+  // bound to it so "this" will work correctly.
+  function overrideMethod(target, methodName, funcSource) {
+    var superFunc = target[methodName] || function() {};
+    var superFuncBound = function() {
+      return superFunc.apply(target, arguments);
+    };
+    target[methodName] = funcSource(superFuncBound);
+  }
+
+  // Add a method to delegator that, when invoked, calls
+  // delegatee.methodName. If there is no such method on
+  // the delegatee, but there was one on delegator before
+  // delegateMethod was called, then the original version
+  // is invoked instead.
+  // For example:
+  //
+  // var a = {
+  //   method1: function() { console.log('a1'); }
+  //   method2: function() { console.log('a2'); }
+  // };
+  // var b = {
+  //   method1: function() { console.log('b1'); }
+  // };
+  // delegateMethod(a, b, "method1");
+  // delegateMethod(a, b, "method2");
+  // a.method1();
+  // a.method2();
+  //
+  // The output would be "b1", "a2".
+  function delegateMethod(delegator, delegatee, methodName) {
+    var inherited = delegator[methodName];
+    delegator[methodName] = function() {
+      var target = delegatee;
+      var method = delegatee[methodName];
+
+      // The method doesn't exist on the delegatee. Instead,
+      // call the method on the delegator, if it exists.
+      if (!method) {
+        target = delegator;
+        method = inherited;
+      }
+
+      if (method) {
+        return method.apply(target, arguments);
+      }
+    };
+  }
+
+  // Implement a vague facsimilie of jQuery's data method
+  function elementData(el, name, value) {
+    if (arguments.length == 2) {
+      return el["htmlwidget_data_" + name];
+    } else if (arguments.length == 3) {
+      el["htmlwidget_data_" + name] = value;
+      return el;
+    } else {
+      throw new Error("Wrong number of arguments for elementData: " +
+        arguments.length);
+    }
+  }
+
+  // http://stackoverflow.com/questions/3446170/escape-string-for-use-in-javascript-regex
+  function escapeRegExp(str) {
+    return str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
+  }
+
+  function hasClass(el, className) {
+    var re = new RegExp("\\b" + escapeRegExp(className) + "\\b");
+    return re.test(el.className);
+  }
+
+  // elements - array (or array-like object) of HTML elements
+  // className - class name to test for
+  // include - if true, only return elements with given className;
+  //   if false, only return elements *without* given className
+  function filterByClass(elements, className, include) {
+    var results = [];
+    for (var i = 0; i < elements.length; i++) {
+      if (hasClass(elements[i], className) == include)
+        results.push(elements[i]);
+    }
+    return results;
+  }
+
+  function on(obj, eventName, func) {
+    if (obj.addEventListener) {
+      obj.addEventListener(eventName, func, false);
+    } else if (obj.attachEvent) {
+      obj.attachEvent(eventName, func);
+    }
+  }
+
+  function off(obj, eventName, func) {
+    if (obj.removeEventListener)
+      obj.removeEventListener(eventName, func, false);
+    else if (obj.detachEvent) {
+      obj.detachEvent(eventName, func);
+    }
+  }
+
+  // Translate array of values to top/right/bottom/left, as usual with
+  // the "padding" CSS property
+  // https://developer.mozilla.org/en-US/docs/Web/CSS/padding
+  function unpackPadding(value) {
+    if (typeof(value) === "number")
+      value = [value];
+    if (value.length === 1) {
+      return {top: value[0], right: value[0], bottom: value[0], left: value[0]};
+    }
+    if (value.length === 2) {
+      return {top: value[0], right: value[1], bottom: value[0], left: value[1]};
+    }
+    if (value.length === 3) {
+      return {top: value[0], right: value[1], bottom: value[2], left: value[1]};
+    }
+    if (value.length === 4) {
+      return {top: value[0], right: value[1], bottom: value[2], left: value[3]};
+    }
+  }
+
+  // Convert an unpacked padding object to a CSS value
+  function paddingToCss(paddingObj) {
+    return paddingObj.top + "px " + paddingObj.right + "px " + paddingObj.bottom + "px " + paddingObj.left + "px";
+  }
+
+  // Makes a number suitable for CSS
+  function px(x) {
+    if (typeof(x) === "number")
+      return x + "px";
+    else
+      return x;
+  }
+
+  // Retrieves runtime widget sizing information for an element.
+  // The return value is either null, or an object with fill, padding,
+  // defaultWidth, defaultHeight fields.
+  function sizingPolicy(el) {
+    var sizingEl = document.querySelector("script[data-for='" + el.id + "'][type='application/htmlwidget-sizing']");
+    if (!sizingEl)
+      return null;
+    var sp = JSON.parse(sizingEl.textContent || sizingEl.text || "{}");
+    if (viewerMode) {
+      return sp.viewer;
+    } else {
+      return sp.browser;
+    }
+  }
+
+  // @param tasks Array of strings (or falsy value, in which case no-op).
+  //   Each element must be a valid JavaScript expression that yields a
+  //   function. Or, can be an array of objects with "code" and "data"
+  //   properties; in this case, the "code" property should be a string
+  //   of JS that's an expr that yields a function, and "data" should be
+  //   an object that will be added as an additional argument when that
+  //   function is called.
+  // @param target The object that will be "this" for each function
+  //   execution.
+  // @param args Array of arguments to be passed to the functions. (The
+  //   same arguments will be passed to all functions.)
+  function evalAndRun(tasks, target, args) {
+    if (tasks) {
+      forEach(tasks, function(task) {
+        var theseArgs = args;
+        if (typeof(task) === "object") {
+          theseArgs = theseArgs.concat([task.data]);
+          task = task.code;
+        }
+        var taskFunc = tryEval(task);
+        if (typeof(taskFunc) !== "function") {
+          throw new Error("Task must be a function! Source:\n" + task);
+        }
+        taskFunc.apply(target, theseArgs);
+      });
+    }
+  }
+
+  // Attempt eval() both with and without enclosing in parentheses.
+  // Note that enclosing coerces a function declaration into
+  // an expression that eval() can parse
+  // (otherwise, a SyntaxError is thrown)
+  function tryEval(code) {
+    var result = null;
+    try {
+      result = eval("(" + code + ")");
+    } catch(error) {
+      if (!(error instanceof SyntaxError)) {
+        throw error;
+      }
+      try {
+        result = eval(code);
+      } catch(e) {
+        if (e instanceof SyntaxError) {
+          throw error;
+        } else {
+          throw e;
+        }
+      }
+    }
+    return result;
+  }
+
+  function initSizing(el) {
+    var sizing = sizingPolicy(el);
+    if (!sizing)
+      return;
+
+    var cel = document.getElementById("htmlwidget_container");
+    if (!cel)
+      return;
+
+    if (typeof(sizing.padding) !== "undefined") {
+      document.body.style.margin = "0";
+      document.body.style.padding = paddingToCss(unpackPadding(sizing.padding));
+    }
+
+    if (sizing.fill) {
+      document.body.style.overflow = "hidden";
+      document.body.style.width = "100%";
+      document.body.style.height = "100%";
+      document.documentElement.style.width = "100%";
+      document.documentElement.style.height = "100%";
+      cel.style.position = "absolute";
+      var pad = unpackPadding(sizing.padding);
+      cel.style.top = pad.top + "px";
+      cel.style.right = pad.right + "px";
+      cel.style.bottom = pad.bottom + "px";
+      cel.style.left = pad.left + "px";
+      el.style.width = "100%";
+      el.style.height = "100%";
+
+      return {
+        getWidth: function() { return cel.getBoundingClientRect().width; },
+        getHeight: function() { return cel.getBoundingClientRect().height; }
+      };
+
+    } else {
+      el.style.width = px(sizing.width);
+      el.style.height = px(sizing.height);
+
+      return {
+        getWidth: function() { return cel.getBoundingClientRect().width; },
+        getHeight: function() { return cel.getBoundingClientRect().height; }
+      };
+    }
+  }
+
+  // Default implementations for methods
+  var defaults = {
+    find: function(scope) {
+      return querySelectorAll(scope, "." + this.name);
+    },
+    renderError: function(el, err) {
+      var $el = $(el);
+
+      this.clearError(el);
+
+      // Add all these error classes, as Shiny does
+      var errClass = "shiny-output-error";
+      if (err.type !== null) {
+        // use the classes of the error condition as CSS class names
+        errClass = errClass + " " + $.map(asArray(err.type), function(type) {
+          return errClass + "-" + type;
+        }).join(" ");
+      }
+      errClass = errClass + " htmlwidgets-error";
+
+      // Is el inline or block? If inline or inline-block, just display:none it
+      // and add an inline error.
+      var display = $el.css("display");
+      $el.data("restore-display-mode", display);
+
+      if (display === "inline" || display === "inline-block") {
+        $el.hide();
+        if (err.message !== "") {
+          var errorSpan = $("<span>").addClass(errClass);
+          errorSpan.text(err.message);
+          $el.after(errorSpan);
+        }
+      } else if (display === "block") {
+        // If block, add an error just after the el, set visibility:none on the
+        // el, and position the error to be on top of the el.
+        // Mark it with a unique ID and CSS class so we can remove it later.
+        $el.css("visibility", "hidden");
+        if (err.message !== "") {
+          var errorDiv = $("<div>").addClass(errClass).css("position", "absolute")
+            .css("top", el.offsetTop)
+            .css("left", el.offsetLeft)
+            // setting width can push out the page size, forcing otherwise
+            // unnecessary scrollbars to appear and making it impossible for
+            // the element to shrink; so use max-width instead
+            .css("maxWidth", el.offsetWidth)
+            .css("height", el.offsetHeight);
+          errorDiv.text(err.message);
+          $el.after(errorDiv);
+
+          // Really dumb way to keep the size/position of the error in sync with
+          // the parent element as the window is resized or whatever.
+          var intId = setInterval(function() {
+            if (!errorDiv[0].parentElement) {
+              clearInterval(intId);
+              return;
+            }
+            errorDiv
+              .css("top", el.offsetTop)
+              .css("left", el.offsetLeft)
+              .css("maxWidth", el.offsetWidth)
+              .css("height", el.offsetHeight);
+          }, 500);
+        }
+      }
+    },
+    clearError: function(el) {
+      var $el = $(el);
+      var display = $el.data("restore-display-mode");
+      $el.data("restore-display-mode", null);
+
+      if (display === "inline" || display === "inline-block") {
+        if (display)
+          $el.css("display", display);
+        $(el.nextSibling).filter(".htmlwidgets-error").remove();
+      } else if (display === "block"){
+        $el.css("visibility", "inherit");
+        $(el.nextSibling).filter(".htmlwidgets-error").remove();
+      }
+    },
+    sizing: {}
+  };
+
+  // Called by widget bindings to register a new type of widget. The definition
+  // object can contain the following properties:
+  // - name (required) - A string indicating the binding name, which will be
+  //   used by default as the CSS classname to look for.
+  // - initialize (optional) - A function(el) that will be called once per
+  //   widget element; if a value is returned, it will be passed as the third
+  //   value to renderValue.
+  // - renderValue (required) - A function(el, data, initValue) that will be
+  //   called with data. Static contexts will cause this to be called once per
+  //   element; Shiny apps will cause this to be called multiple times per
+  //   element, as the data changes.
+  window.HTMLWidgets.widget = function(definition) {
+    if (!definition.name) {
+      throw new Error("Widget must have a name");
+    }
+    if (!definition.type) {
+      throw new Error("Widget must have a type");
+    }
+    // Currently we only support output widgets
+    if (definition.type !== "output") {
+      throw new Error("Unrecognized widget type '" + definition.type + "'");
+    }
+    // TODO: Verify that .name is a valid CSS classname
+
+    // Support new-style instance-bound definitions. Old-style class-bound
+    // definitions have one widget "object" per widget per type/class of
+    // widget; the renderValue and resize methods on such widget objects
+    // take el and instance arguments, because the widget object can't
+    // store them. New-style instance-bound definitions have one widget
+    // object per widget instance; the definition that's passed in doesn't
+    // provide renderValue or resize methods at all, just the single method
+    //   factory(el, width, height)
+    // which returns an object that has renderValue(x) and resize(w, h).
+    // This enables a far more natural programming style for the widget
+    // author, who can store per-instance state using either OO-style
+    // instance fields or functional-style closure variables (I guess this
+    // is in contrast to what can only be called C-style pseudo-OO which is
+    // what we required before).
+    if (definition.factory) {
+      definition = createLegacyDefinitionAdapter(definition);
+    }
+
+    if (!definition.renderValue) {
+      throw new Error("Widget must have a renderValue function");
+    }
+
+    // For static rendering (non-Shiny), use a simple widget registration
+    // scheme. We also use this scheme for Shiny apps/documents that also
+    // contain static widgets.
+    window.HTMLWidgets.widgets = window.HTMLWidgets.widgets || [];
+    // Merge defaults into the definition; don't mutate the original definition.
+    var staticBinding = extend({}, defaults, definition);
+    overrideMethod(staticBinding, "find", function(superfunc) {
+      return function(scope) {
+        var results = superfunc(scope);
+        // Filter out Shiny outputs, we only want the static kind
+        return filterByClass(results, "html-widget-output", false);
+      };
+    });
+    window.HTMLWidgets.widgets.push(staticBinding);
+
+    if (shinyMode) {
+      // Shiny is running. Register the definition with an output binding.
+      // The definition itself will not be the output binding, instead
+      // we will make an output binding object that delegates to the
+      // definition. This is because we foolishly used the same method
+      // name (renderValue) for htmlwidgets definition and Shiny bindings
+      // but they actually have quite different semantics (the Shiny
+      // bindings receive data that includes lots of metadata that it
+      // strips off before calling htmlwidgets renderValue). We can't
+      // just ignore the difference because in some widgets it's helpful
+      // to call this.renderValue() from inside of resize(), and if
+      // we're not delegating, then that call will go to the Shiny
+      // version instead of the htmlwidgets version.
+
+      // Merge defaults with definition, without mutating either.
+      var bindingDef = extend({}, defaults, definition);
+
+      // This object will be our actual Shiny binding.
+      var shinyBinding = new Shiny.OutputBinding();
+
+      // With a few exceptions, we'll want to simply use the bindingDef's
+      // version of methods if they are available, otherwise fall back to
+      // Shiny's defaults. NOTE: If Shiny's output bindings gain additional
+      // methods in the future, and we want them to be overrideable by
+      // HTMLWidget binding definitions, then we'll need to add them to this
+      // list.
+      delegateMethod(shinyBinding, bindingDef, "getId");
+      delegateMethod(shinyBinding, bindingDef, "onValueChange");
+      delegateMethod(shinyBinding, bindingDef, "onValueError");
+      delegateMethod(shinyBinding, bindingDef, "renderError");
+      delegateMethod(shinyBinding, bindingDef, "clearError");
+      delegateMethod(shinyBinding, bindingDef, "showProgress");
+
+      // The find, renderValue, and resize are handled differently, because we
+      // want to actually decorate the behavior of the bindingDef methods.
+
+      shinyBinding.find = function(scope) {
+        var results = bindingDef.find(scope);
+
+        // Only return elements that are Shiny outputs, not static ones
+        var dynamicResults = results.filter(".html-widget-output");
+
+        // It's possible that whatever caused Shiny to think there might be
+        // new dynamic outputs, also caused there to be new static outputs.
+        // Since there might be lots of different htmlwidgets bindings, we
+        // schedule execution for later--no need to staticRender multiple
+        // times.
+        if (results.length !== dynamicResults.length)
+          scheduleStaticRender();
+
+        return dynamicResults;
+      };
+
+      // Wrap renderValue to handle initialization, which unfortunately isn't
+      // supported natively by Shiny at the time of this writing.
+
+      shinyBinding.renderValue = function(el, data) {
+        Shiny.renderDependencies(data.deps);
+        // Resolve strings marked as javascript literals to objects
+        if (!(data.evals instanceof Array)) data.evals = [data.evals];
+        for (var i = 0; data.evals && i < data.evals.length; i++) {
+          window.HTMLWidgets.evaluateStringMember(data.x, data.evals[i]);
+        }
+        if (!bindingDef.renderOnNullValue) {
+          if (data.x === null) {
+            el.style.visibility = "hidden";
+            return;
+          } else {
+            el.style.visibility = "inherit";
+          }
+        }
+        if (!elementData(el, "initialized")) {
+          initSizing(el);
+
+          elementData(el, "initialized", true);
+          if (bindingDef.initialize) {
+            var rect = el.getBoundingClientRect();
+            var result = bindingDef.initialize(el, rect.width, rect.height);
+            elementData(el, "init_result", result);
+          }
+        }
+        bindingDef.renderValue(el, data.x, elementData(el, "init_result"));
+        evalAndRun(data.jsHooks.render, elementData(el, "init_result"), [el, data.x]);
+      };
+
+      // Only override resize if bindingDef implements it
+      if (bindingDef.resize) {
+        shinyBinding.resize = function(el, width, height) {
+          // Shiny can call resize before initialize/renderValue have been
+          // called, which doesn't make sense for widgets.
+          if (elementData(el, "initialized")) {
+            bindingDef.resize(el, width, height, elementData(el, "init_result"));
+          }
+        };
+      }
+
+      Shiny.outputBindings.register(shinyBinding, bindingDef.name);
+    }
+  };
+
+  var scheduleStaticRenderTimerId = null;
+  function scheduleStaticRender() {
+    if (!scheduleStaticRenderTimerId) {
+      scheduleStaticRenderTimerId = setTimeout(function() {
+        scheduleStaticRenderTimerId = null;
+        window.HTMLWidgets.staticRender();
+      }, 1);
+    }
+  }
+
+  // Render static widgets after the document finishes loading
+  // Statically render all elements that are of this widget's class
+  window.HTMLWidgets.staticRender = function() {
+    var bindings = window.HTMLWidgets.widgets || [];
+    forEach(bindings, function(binding) {
+      var matches = binding.find(document.documentElement);
+      forEach(matches, function(el) {
+        var sizeObj = initSizing(el, binding);
+
+        var getSize = function(el) {
+          if (sizeObj) {
+            return {w: sizeObj.getWidth(), h: sizeObj.getHeight()}
+          } else {
+            var rect = el.getBoundingClientRect();
+            return {w: rect.width, h: rect.height}
+          }
+        };
+
+        if (hasClass(el, "html-widget-static-bound"))
+          return;
+        el.className = el.className + " html-widget-static-bound";
+
+        var initResult;
+        if (binding.initialize) {
+          var size = getSize(el);
+          initResult = binding.initialize(el, size.w, size.h);
+          elementData(el, "init_result", initResult);
+        }
+
+        if (binding.resize) {
+          var lastSize = getSize(el);
+          var resizeHandler = function(e) {
+            var size = getSize(el);
+            if (size.w === 0 && size.h === 0)
+              return;
+            if (size.w === lastSize.w && size.h === lastSize.h)
+              return;
+            lastSize = size;
+            binding.resize(el, size.w, size.h, initResult);
+          };
+
+          on(window, "resize", resizeHandler);
+
+          // This is needed for cases where we're running in a Shiny
+          // app, but the widget itself is not a Shiny output, but
+          // rather a simple static widget. One example of this is
+          // an rmarkdown document that has runtime:shiny and widget
+          // that isn't in a render function. Shiny only knows to
+          // call resize handlers for Shiny outputs, not for static
+          // widgets, so we do it ourselves.
+          if (window.jQuery) {
+            window.jQuery(document).on(
+              "shown.htmlwidgets shown.bs.tab.htmlwidgets shown.bs.collapse.htmlwidgets",
+              resizeHandler
+            );
+            window.jQuery(document).on(
+              "hidden.htmlwidgets hidden.bs.tab.htmlwidgets hidden.bs.collapse.htmlwidgets",
+              resizeHandler
+            );
+          }
+
+          // This is needed for the specific case of ioslides, which
+          // flips slides between display:none and display:block.
+          // Ideally we would not have to have ioslide-specific code
+          // here, but rather have ioslides raise a generic event,
+          // but the rmarkdown package just went to CRAN so the
+          // window to getting that fixed may be long.
+          if (window.addEventListener) {
+            // It's OK to limit this to window.addEventListener
+            // browsers because ioslides itself only supports
+            // such browsers.
+            on(document, "slideenter", resizeHandler);
+            on(document, "slideleave", resizeHandler);
+          }
+        }
+
+        var scriptData = document.querySelector("script[data-for='" + el.id + "'][type='application/json']");
+        if (scriptData) {
+          var data = JSON.parse(scriptData.textContent || scriptData.text);
+          // Resolve strings marked as javascript literals to objects
+          if (!(data.evals instanceof Array)) data.evals = [data.evals];
+          for (var k = 0; data.evals && k < data.evals.length; k++) {
+            window.HTMLWidgets.evaluateStringMember(data.x, data.evals[k]);
+          }
+          binding.renderValue(el, data.x, initResult);
+          evalAndRun(data.jsHooks.render, initResult, [el, data.x]);
+        }
+      });
+    });
+
+    invokePostRenderHandlers();
+  }
+
+
+  function has_jQuery3() {
+    if (!window.jQuery) {
+      return false;
+    }
+    var $version = window.jQuery.fn.jquery;
+    var $major_version = parseInt($version.split(".")[0]);
+    return $major_version >= 3;
+  }
+
+  /*
+  / Shiny 1.4 bumped jQuery from 1.x to 3.x which means jQuery's
+  / on-ready handler (i.e., $(fn)) is now asyncronous (i.e., it now
+  / really means $(setTimeout(fn)).
+  / https://jquery.com/upgrade-guide/3.0/#breaking-change-document-ready-handlers-are-now-asynchronous
+  /
+  / Since Shiny uses $() to schedule initShiny, shiny>=1.4 calls initShiny
+  / one tick later than it did before, which means staticRender() is
+  / called renderValue() earlier than (advanced) widget authors might be expecting.
+  / https://github.com/rstudio/shiny/issues/2630
+  /
+  / For a concrete example, leaflet has some methods (e.g., updateBounds)
+  / which reference Shiny methods registered in initShiny (e.g., setInputValue).
+  / Since leaflet is privy to this life-cycle, it knows to use setTimeout() to
+  / delay execution of those methods (until Shiny methods are ready)
+  / https://github.com/rstudio/leaflet/blob/18ec981/javascript/src/index.js#L266-L268
+  /
+  / Ideally widget authors wouldn't need to use this setTimeout() hack that
+  / leaflet uses to call Shiny methods on a staticRender(). In the long run,
+  / the logic initShiny should be broken up so that method registration happens
+  / right away, but binding happens later.
+  */
+  function maybeStaticRenderLater() {
+    if (shinyMode && has_jQuery3()) {
+      window.jQuery(window.HTMLWidgets.staticRender);
+    } else {
+      window.HTMLWidgets.staticRender();
+    }
+  }
+
+  if (document.addEventListener) {
+    document.addEventListener("DOMContentLoaded", function() {
+      document.removeEventListener("DOMContentLoaded", arguments.callee, false);
+      maybeStaticRenderLater();
+    }, false);
+  } else if (document.attachEvent) {
+    document.attachEvent("onreadystatechange", function() {
+      if (document.readyState === "complete") {
+        document.detachEvent("onreadystatechange", arguments.callee);
+        maybeStaticRenderLater();
+      }
+    });
+  }
+
+
+  window.HTMLWidgets.getAttachmentUrl = function(depname, key) {
+    // If no key, default to the first item
+    if (typeof(key) === "undefined")
+      key = 1;
+
+    var link = document.getElementById(depname + "-" + key + "-attachment");
+    if (!link) {
+      throw new Error("Attachment " + depname + "/" + key + " not found in document");
+    }
+    return link.getAttribute("href");
+  };
+
+  window.HTMLWidgets.dataframeToD3 = function(df) {
+    var names = [];
+    var length;
+    for (var name in df) {
+        if (df.hasOwnProperty(name))
+            names.push(name);
+        if (typeof(df[name]) !== "object" || typeof(df[name].length) === "undefined") {
+            throw new Error("All fields must be arrays");
+        } else if (typeof(length) !== "undefined" && length !== df[name].length) {
+            throw new Error("All fields must be arrays of the same length");
+        }
+        length = df[name].length;
+    }
+    var results = [];
+    var item;
+    for (var row = 0; row < length; row++) {
+        item = {};
+        for (var col = 0; col < names.length; col++) {
+            item[names[col]] = df[names[col]][row];
+        }
+        results.push(item);
+    }
+    return results;
+  };
+
+  window.HTMLWidgets.transposeArray2D = function(array) {
+      if (array.length === 0) return array;
+      var newArray = array[0].map(function(col, i) {
+          return array.map(function(row) {
+              return row[i]
+          })
+      });
+      return newArray;
+  };
+  // Split value at splitChar, but allow splitChar to be escaped
+  // using escapeChar. Any other characters escaped by escapeChar
+  // will be included as usual (including escapeChar itself).
+  function splitWithEscape(value, splitChar, escapeChar) {
+    var results = [];
+    var escapeMode = false;
+    var currentResult = "";
+    for (var pos = 0; pos < value.length; pos++) {
+      if (!escapeMode) {
+        if (value[pos] === splitChar) {
+          results.push(currentResult);
+          currentResult = "";
+        } else if (value[pos] === escapeChar) {
+          escapeMode = true;
+        } else {
+          currentResult += value[pos];
+        }
+      } else {
+        currentResult += value[pos];
+        escapeMode = false;
+      }
+    }
+    if (currentResult !== "") {
+      results.push(currentResult);
+    }
+    return results;
+  }
+  // Function authored by Yihui/JJ Allaire
+  window.HTMLWidgets.evaluateStringMember = function(o, member) {
+    var parts = splitWithEscape(member, '.', '\\');
+    for (var i = 0, l = parts.length; i < l; i++) {
+      var part = parts[i];
+      // part may be a character or 'numeric' member name
+      if (o !== null && typeof o === "object" && part in o) {
+        if (i == (l - 1)) { // if we are at the end of the line then evalulate
+          if (typeof o[part] === "string")
+            o[part] = tryEval(o[part]);
+        } else { // otherwise continue to next embedded object
+          o = o[part];
+        }
+      }
+    }
+  };
+
+  // Retrieve the HTMLWidget instance (i.e. the return value of an
+  // HTMLWidget binding's initialize() or factory() function)
+  // associated with an element, or null if none.
+  window.HTMLWidgets.getInstance = function(el) {
+    return elementData(el, "init_result");
+  };
+
+  // Finds the first element in the scope that matches the selector,
+  // and returns the HTMLWidget instance (i.e. the return value of
+  // an HTMLWidget binding's initialize() or factory() function)
+  // associated with that element, if any. If no element matches the
+  // selector, or the first matching element has no HTMLWidget
+  // instance associated with it, then null is returned.
+  //
+  // The scope argument is optional, and defaults to window.document.
+  window.HTMLWidgets.find = function(scope, selector) {
+    if (arguments.length == 1) {
+      selector = scope;
+      scope = document;
+    }
+
+    var el = scope.querySelector(selector);
+    if (el === null) {
+      return null;
+    } else {
+      return window.HTMLWidgets.getInstance(el);
+    }
+  };
+
+  // Finds all elements in the scope that match the selector, and
+  // returns the HTMLWidget instances (i.e. the return values of
+  // an HTMLWidget binding's initialize() or factory() function)
+  // associated with the elements, in an array. If elements that
+  // match the selector don't have an associated HTMLWidget
+  // instance, the returned array will contain nulls.
+  //
+  // The scope argument is optional, and defaults to window.document.
+  window.HTMLWidgets.findAll = function(scope, selector) {
+    if (arguments.length == 1) {
+      selector = scope;
+      scope = document;
+    }
+
+    var nodes = scope.querySelectorAll(selector);
+    var results = [];
+    for (var i = 0; i < nodes.length; i++) {
+      results.push(window.HTMLWidgets.getInstance(nodes[i]));
+    }
+    return results;
+  };
+
+  var postRenderHandlers = [];
+  function invokePostRenderHandlers() {
+    while (postRenderHandlers.length) {
+      var handler = postRenderHandlers.shift();
+      if (handler) {
+        handler();
+      }
+    }
+  }
+
+  // Register the given callback function to be invoked after the
+  // next time static widgets are rendered.
+  window.HTMLWidgets.addPostRenderHandler = function(callback) {
+    postRenderHandlers.push(callback);
+  };
+
+  // Takes a new-style instance-bound definition, and returns an
+  // old-style class-bound definition. This saves us from having
+  // to rewrite all the logic in this file to accomodate both
+  // types of definitions.
+  function createLegacyDefinitionAdapter(defn) {
+    var result = {
+      name: defn.name,
+      type: defn.type,
+      initialize: function(el, width, height) {
+        return defn.factory(el, width, height);
+      },
+      renderValue: function(el, x, instance) {
+        return instance.renderValue(x);
+      },
+      resize: function(el, width, height, instance) {
+        return instance.resize(width, height);
+      }
+    };
+
+    if (defn.find)
+      result.find = defn.find;
+    if (defn.renderError)
+      result.renderError = defn.renderError;
+    if (defn.clearError)
+      result.clearError = defn.clearError;
+
+    return result;
+  }
+})();
+</script>
+<style type="text/css">.jsondiffpatch-delta {
+font-family: 'Bitstream Vera Sans Mono', 'DejaVu Sans Mono', Monaco, Courier, monospace;
+font-size: 12px;
+margin: 0;
+padding: 0 0 0 12px;
+display: inline-block;
+}
+.jsondiffpatch-delta pre {
+font-family: 'Bitstream Vera Sans Mono', 'DejaVu Sans Mono', Monaco, Courier, monospace;
+font-size: 12px;
+margin: 0;
+padding: 0;
+display: inline-block;
+}
+ul.jsondiffpatch-delta {
+list-style-type: none;
+padding: 0 0 0 20px;
+margin: 0;
+}
+.jsondiffpatch-delta ul {
+list-style-type: none;
+padding: 0 0 0 20px;
+margin: 0;
+}
+.jsondiffpatch-added .jsondiffpatch-property-name,
+.jsondiffpatch-added .jsondiffpatch-value pre,
+.jsondiffpatch-modified .jsondiffpatch-right-value pre,
+.jsondiffpatch-textdiff-added {
+background: #bbffbb;
+}
+.jsondiffpatch-deleted .jsondiffpatch-property-name,
+.jsondiffpatch-deleted pre,
+.jsondiffpatch-modified .jsondiffpatch-left-value pre,
+.jsondiffpatch-textdiff-deleted {
+background: #ffbbbb;
+text-decoration: line-through;
+}
+.jsondiffpatch-unchanged,
+.jsondiffpatch-movedestination {
+color: gray;
+}
+.jsondiffpatch-unchanged,
+.jsondiffpatch-movedestination > .jsondiffpatch-value {
+transition: all 0.5s;
+-webkit-transition: all 0.5s;
+overflow-y: hidden;
+}
+.jsondiffpatch-unchanged-showing .jsondiffpatch-unchanged,
+.jsondiffpatch-unchanged-showing .jsondiffpatch-movedestination > .jsondiffpatch-value {
+max-height: 100px;
+}
+.jsondiffpatch-unchanged-hidden .jsondiffpatch-unchanged,
+.jsondiffpatch-unchanged-hidden .jsondiffpatch-movedestination > .jsondiffpatch-value {
+max-height: 0;
+}
+.jsondiffpatch-unchanged-hiding .jsondiffpatch-movedestination > .jsondiffpatch-value,
+.jsondiffpatch-unchanged-hidden .jsondiffpatch-movedestination > .jsondiffpatch-value {
+display: block;
+}
+.jsondiffpatch-unchanged-visible .jsondiffpatch-unchanged,
+.jsondiffpatch-unchanged-visible .jsondiffpatch-movedestination > .jsondiffpatch-value {
+max-height: 100px;
+}
+.jsondiffpatch-unchanged-hiding .jsondiffpatch-unchanged,
+.jsondiffpatch-unchanged-hiding .jsondiffpatch-movedestination > .jsondiffpatch-value {
+max-height: 0;
+}
+.jsondiffpatch-unchanged-showing .jsondiffpatch-arrow,
+.jsondiffpatch-unchanged-hiding .jsondiffpatch-arrow {
+display: none;
+}
+.jsondiffpatch-value {
+display: inline-block;
+}
+.jsondiffpatch-property-name {
+display: inline-block;
+padding-right: 5px;
+vertical-align: top;
+}
+.jsondiffpatch-property-name:after {
+content: ': ';
+}
+.jsondiffpatch-child-node-type-array > .jsondiffpatch-property-name:after {
+content: ': [';
+}
+.jsondiffpatch-child-node-type-array:after {
+content: '],';
+}
+div.jsondiffpatch-child-node-type-array:before {
+content: '[';
+}
+div.jsondiffpatch-child-node-type-array:after {
+content: ']';
+}
+.jsondiffpatch-child-node-type-object > .jsondiffpatch-property-name:after {
+content: ': {';
+}
+.jsondiffpatch-child-node-type-object:after {
+content: '},';
+}
+div.jsondiffpatch-child-node-type-object:before {
+content: '{';
+}
+div.jsondiffpatch-child-node-type-object:after {
+content: '}';
+}
+.jsondiffpatch-value pre:after {
+content: ',';
+}
+li:last-child > .jsondiffpatch-value pre:after,
+.jsondiffpatch-modified > .jsondiffpatch-left-value pre:after {
+content: '';
+}
+.jsondiffpatch-modified .jsondiffpatch-value {
+display: inline-block;
+}
+.jsondiffpatch-modified .jsondiffpatch-right-value {
+margin-left: 5px;
+}
+.jsondiffpatch-moved .jsondiffpatch-value {
+display: none;
+}
+.jsondiffpatch-moved .jsondiffpatch-moved-destination {
+display: inline-block;
+background: #ffffbb;
+color: #888;
+}
+.jsondiffpatch-moved .jsondiffpatch-moved-destination:before {
+content: ' => ';
+}
+ul.jsondiffpatch-textdiff {
+padding: 0;
+}
+.jsondiffpatch-textdiff-location {
+color: #bbb;
+display: inline-block;
+min-width: 60px;
+}
+.jsondiffpatch-textdiff-line {
+display: inline-block;
+}
+.jsondiffpatch-textdiff-line-number:after {
+content: ',';
+}
+.jsondiffpatch-error {
+background: red;
+color: white;
+font-weight: bold;
+}
+</style>
+<style type="text/css">.jsondiffpatch-annotated-delta {
+font-family: 'Bitstream Vera Sans Mono', 'DejaVu Sans Mono', Monaco, Courier, monospace;
+font-size: 12px;
+margin: 0;
+padding: 0 0 0 12px;
+display: inline-block;
+}
+.jsondiffpatch-annotated-delta pre {
+font-family: 'Bitstream Vera Sans Mono', 'DejaVu Sans Mono', Monaco, Courier, monospace;
+font-size: 12px;
+margin: 0;
+padding: 0;
+display: inline-block;
+}
+.jsondiffpatch-annotated-delta td {
+margin: 0;
+padding: 0;
+}
+.jsondiffpatch-annotated-delta td pre:hover {
+font-weight: bold;
+}
+td.jsondiffpatch-delta-note {
+font-style: italic;
+padding-left: 10px;
+}
+.jsondiffpatch-delta-note > div {
+margin: 0;
+padding: 0;
+}
+.jsondiffpatch-delta-note pre {
+font-style: normal;
+}
+.jsondiffpatch-annotated-delta .jsondiffpatch-delta-note {
+color: #777;
+}
+.jsondiffpatch-annotated-delta tr:hover {
+background: #ffc;
+}
+.jsondiffpatch-annotated-delta tr:hover > td.jsondiffpatch-delta-note {
+color: black;
+}
+.jsondiffpatch-error {
+background: red;
+color: white;
+font-weight: bold;
+}
+</style>
+<script>!function(e){if("object"==typeof exports&&"undefined"!=typeof module)module.exports=e();else if("function"==typeof define&&define.amd)define([],e);else{var f;"undefined"!=typeof window?f=window:"undefined"!=typeof global?f=global:"undefined"!=typeof self&&(f=self),f.jsondiffpatch=e()}}(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+var environment=require("./environment");environment.isBrowser&&(window.diff_match_patch=require("../public/external/diff_match_patch_uncompressed")),module.exports=require("./main");
+},{"../public/external/diff_match_patch_uncompressed":2,"./environment":10,"./main":17}],2:[function(require,module,exports){
+function diff_match_patch(){this.Diff_Timeout=1,this.Diff_EditCost=4,this.Match_Threshold=.5,this.Match_Distance=1e3,this.Patch_DeleteThreshold=.5,this.Patch_Margin=4,this.Match_MaxBits=32}var DIFF_DELETE=-1,DIFF_INSERT=1,DIFF_EQUAL=0;diff_match_patch.Diff,diff_match_patch.prototype.diff_main=function(t,n,e,i){"undefined"==typeof i&&(i=this.Diff_Timeout<=0?Number.MAX_VALUE:(new Date).getTime()+1e3*this.Diff_Timeout);var h=i;if(null==t||null==n)throw new Error("Null input. (diff_main)");if(t==n)return t?[[DIFF_EQUAL,t]]:[];"undefined"==typeof e&&(e=!0);var r=e,f=this.diff_commonPrefix(t,n),a=t.substring(0,f);t=t.substring(f),n=n.substring(f),f=this.diff_commonSuffix(t,n);var s=t.substring(t.length-f);t=t.substring(0,t.length-f),n=n.substring(0,n.length-f);var l=this.diff_compute_(t,n,r,h);return a&&l.unshift([DIFF_EQUAL,a]),s&&l.push([DIFF_EQUAL,s]),this.diff_cleanupMerge(l),l},diff_match_patch.prototype.diff_compute_=function(t,n,e,i){var h;if(!t)return[[DIFF_INSERT,n]];if(!n)return[[DIFF_DELETE,t]];var r=t.length>n.length?t:n,f=t.length>n.length?n:t,a=r.indexOf(f);if(-1!=a)return h=[[DIFF_INSERT,r.substring(0,a)],[DIFF_EQUAL,f],[DIFF_INSERT,r.substring(a+f.length)]],t.length>n.length&&(h[0][0]=h[2][0]=DIFF_DELETE),h;if(1==f.length)return[[DIFF_DELETE,t],[DIFF_INSERT,n]];r=f=null;var s=this.diff_halfMatch_(t,n);if(s){var l=s[0],g=s[1],c=s[2],_=s[3],o=s[4],u=this.diff_main(l,c,e,i),p=this.diff_main(g,_,e,i);return u.concat([[DIFF_EQUAL,o]],p)}return e&&t.length>100&&n.length>100?this.diff_lineMode_(t,n,i):this.diff_bisect_(t,n,i)},diff_match_patch.prototype.diff_lineMode_=function(t,n,e){var i=this.diff_linesToChars_(t,n);t=i[0],n=i[1];var h=i[2],r=this.diff_bisect_(t,n,e);this.diff_charsToLines_(r,h),this.diff_cleanupSemantic(r),r.push([DIFF_EQUAL,""]);for(var f=0,a=0,s=0,l="",g="";f<r.length;){switch(r[f][0]){case DIFF_INSERT:s++,g+=r[f][1];break;case DIFF_DELETE:a++,l+=r[f][1];break;case DIFF_EQUAL:if(a>=1&&s>=1){var i=this.diff_main(l,g,!1,e);r.splice(f-a-s,a+s),f=f-a-s;for(var c=i.length-1;c>=0;c--)r.splice(f,0,i[c]);f+=i.length}s=0,a=0,l="",g=""}f++}return r.pop(),r},diff_match_patch.prototype.diff_bisect_=function(t,n,e){for(var i=t.length,h=n.length,r=Math.ceil((i+h)/2),f=r,a=2*r,s=new Array(a),l=new Array(a),g=0;a>g;g++)s[g]=-1,l[g]=-1;s[f+1]=0,l[f+1]=0;for(var c=i-h,_=c%2!=0,o=0,u=0,p=0,d=0,F=0;r>F&&!((new Date).getTime()>e);F++){for(var E=-F+o;F-u>=E;E+=2){var D,I=f+E;D=E==-F||E!=F&&s[I-1]<s[I+1]?s[I+1]:s[I-1]+1;for(var m=D-E;i>D&&h>m&&t.charAt(D)==n.charAt(m);)D++,m++;if(s[I]=D,D>i)u+=2;else if(m>h)o+=2;else if(_){var b=f+c-E;if(b>=0&&a>b&&-1!=l[b]){var v=i-l[b];if(D>=v)return this.diff_bisectSplit_(t,n,D,m,e)}}}for(var L=-F+p;F-d>=L;L+=2){var v,b=f+L;v=L==-F||L!=F&&l[b-1]<l[b+1]?l[b+1]:l[b-1]+1;for(var T=v-L;i>v&&h>T&&t.charAt(i-v-1)==n.charAt(h-T-1);)v++,T++;if(l[b]=v,v>i)d+=2;else if(T>h)p+=2;else if(!_){var I=f+c-L;if(I>=0&&a>I&&-1!=s[I]){var D=s[I],m=f+D-I;if(v=i-v,D>=v)return this.diff_bisectSplit_(t,n,D,m,e)}}}}return[[DIFF_DELETE,t],[DIFF_INSERT,n]]},diff_match_patch.prototype.diff_bisectSplit_=function(t,n,e,i,h){var r=t.substring(0,e),f=n.substring(0,i),a=t.substring(e),s=n.substring(i),l=this.diff_main(r,f,!1,h),g=this.diff_main(a,s,!1,h);return l.concat(g)},diff_match_patch.prototype.diff_linesToChars_=function(t,n){function e(t){for(var n="",e=0,r=-1,f=i.length;r<t.length-1;){r=t.indexOf("\n",e),-1==r&&(r=t.length-1);var a=t.substring(e,r+1);e=r+1,(h.hasOwnProperty?h.hasOwnProperty(a):void 0!==h[a])?n+=String.fromCharCode(h[a]):(n+=String.fromCharCode(f),h[a]=f,i[f++]=a)}return n}var i=[],h={};i[0]="";var r=e(t),f=e(n);return[r,f,i]},diff_match_patch.prototype.diff_charsToLines_=function(t,n){for(var e=0;e<t.length;e++){for(var i=t[e][1],h=[],r=0;r<i.length;r++)h[r]=n[i.charCodeAt(r)];t[e][1]=h.join("")}},diff_match_patch.prototype.diff_commonPrefix=function(t,n){if(!t||!n||t.charAt(0)!=n.charAt(0))return 0;for(var e=0,i=Math.min(t.length,n.length),h=i,r=0;h>e;)t.substring(r,h)==n.substring(r,h)?(e=h,r=e):i=h,h=Math.floor((i-e)/2+e);return h},diff_match_patch.prototype.diff_commonSuffix=function(t,n){if(!t||!n||t.charAt(t.length-1)!=n.charAt(n.length-1))return 0;for(var e=0,i=Math.min(t.length,n.length),h=i,r=0;h>e;)t.substring(t.length-h,t.length-r)==n.substring(n.length-h,n.length-r)?(e=h,r=e):i=h,h=Math.floor((i-e)/2+e);return h},diff_match_patch.prototype.diff_commonOverlap_=function(t,n){var e=t.length,i=n.length;if(0==e||0==i)return 0;e>i?t=t.substring(e-i):i>e&&(n=n.substring(0,e));var h=Math.min(e,i);if(t==n)return h;for(var r=0,f=1;;){var a=t.substring(h-f),s=n.indexOf(a);if(-1==s)return r;f+=s,0!=s&&t.substring(h-f)!=n.substring(0,f)||(r=f,f++)}},diff_match_patch.prototype.diff_halfMatch_=function(t,n){function e(t,n,e){for(var i,h,r,a,s=t.substring(e,e+Math.floor(t.length/4)),l=-1,g="";-1!=(l=n.indexOf(s,l+1));){var c=f.diff_commonPrefix(t.substring(e),n.substring(l)),_=f.diff_commonSuffix(t.substring(0,e),n.substring(0,l));g.length<_+c&&(g=n.substring(l-_,l)+n.substring(l,l+c),i=t.substring(0,e-_),h=t.substring(e+c),r=n.substring(0,l-_),a=n.substring(l+c))}return 2*g.length>=t.length?[i,h,r,a,g]:null}if(this.Diff_Timeout<=0)return null;var i=t.length>n.length?t:n,h=t.length>n.length?n:t;if(i.length<4||2*h.length<i.length)return null;var r,f=this,a=e(i,h,Math.ceil(i.length/4)),s=e(i,h,Math.ceil(i.length/2));if(!a&&!s)return null;r=s?a&&a[4].length>s[4].length?a:s:a;var l,g,c,_;t.length>n.length?(l=r[0],g=r[1],c=r[2],_=r[3]):(c=r[0],_=r[1],l=r[2],g=r[3]);var o=r[4];return[l,g,c,_,o]},diff_match_patch.prototype.diff_cleanupSemantic=function(t){for(var n=!1,e=[],i=0,h=null,r=0,f=0,a=0,s=0,l=0;r<t.length;)t[r][0]==DIFF_EQUAL?(e[i++]=r,f=s,a=l,s=0,l=0,h=t[r][1]):(t[r][0]==DIFF_INSERT?s+=t[r][1].length:l+=t[r][1].length,null!==h&&h.length<=Math.max(f,a)&&h.length<=Math.max(s,l)&&(t.splice(e[i-1],0,[DIFF_DELETE,h]),t[e[i-1]+1][0]=DIFF_INSERT,i--,i--,r=i>0?e[i-1]:-1,f=0,a=0,s=0,l=0,h=null,n=!0)),r++;for(n&&this.diff_cleanupMerge(t),this.diff_cleanupSemanticLossless(t),r=1;r<t.length;){if(t[r-1][0]==DIFF_DELETE&&t[r][0]==DIFF_INSERT){var g=t[r-1][1],c=t[r][1],_=this.diff_commonOverlap_(g,c);(_>=g.length/2||_>=c.length/2)&&(t.splice(r,0,[DIFF_EQUAL,c.substring(0,_)]),t[r-1][1]=g.substring(0,g.length-_),t[r+1][1]=c.substring(_),r++),r++}r++}},diff_match_patch.prototype.diff_cleanupSemanticLossless=function(t){function n(t,n){if(!t||!n)return 5;var a=0;return(t.charAt(t.length-1).match(e)||n.charAt(0).match(e))&&(a++,(t.charAt(t.length-1).match(i)||n.charAt(0).match(i))&&(a++,(t.charAt(t.length-1).match(h)||n.charAt(0).match(h))&&(a++,(t.match(r)||n.match(f))&&a++))),a}for(var e=/[^a-zA-Z0-9]/,i=/\s/,h=/[\r\n]/,r=/\n\r?\n$/,f=/^\r?\n\r?\n/,a=1;a<t.length-1;){if(t[a-1][0]==DIFF_EQUAL&&t[a+1][0]==DIFF_EQUAL){var s=t[a-1][1],l=t[a][1],g=t[a+1][1],c=this.diff_commonSuffix(s,l);if(c){var _=l.substring(l.length-c);s=s.substring(0,s.length-c),l=_+l.substring(0,l.length-c),g=_+g}for(var o=s,u=l,p=g,d=n(s,l)+n(l,g);l.charAt(0)===g.charAt(0);){s+=l.charAt(0),l=l.substring(1)+g.charAt(0),g=g.substring(1);var F=n(s,l)+n(l,g);F>=d&&(d=F,o=s,u=l,p=g)}t[a-1][1]!=o&&(o?t[a-1][1]=o:(t.splice(a-1,1),a--),t[a][1]=u,p?t[a+1][1]=p:(t.splice(a+1,1),a--))}a++}},diff_match_patch.prototype.diff_cleanupEfficiency=function(t){for(var n=!1,e=[],i=0,h="",r=0,f=!1,a=!1,s=!1,l=!1;r<t.length;)t[r][0]==DIFF_EQUAL?(t[r][1].length<this.Diff_EditCost&&(s||l)?(e[i++]=r,f=s,a=l,h=t[r][1]):(i=0,h=""),s=l=!1):(t[r][0]==DIFF_DELETE?l=!0:s=!0,h&&(f&&a&&s&&l||h.length<this.Diff_EditCost/2&&f+a+s+l==3)&&(t.splice(e[i-1],0,[DIFF_DELETE,h]),t[e[i-1]+1][0]=DIFF_INSERT,i--,h="",f&&a?(s=l=!0,i=0):(i--,r=i>0?e[i-1]:-1,s=l=!1),n=!0)),r++;n&&this.diff_cleanupMerge(t)},diff_match_patch.prototype.diff_cleanupMerge=function(t){t.push([DIFF_EQUAL,""]);for(var n,e=0,i=0,h=0,r="",f="";e<t.length;)switch(t[e][0]){case DIFF_INSERT:h++,f+=t[e][1],e++;break;case DIFF_DELETE:i++,r+=t[e][1],e++;break;case DIFF_EQUAL:i+h>1?(0!==i&&0!==h&&(n=this.diff_commonPrefix(f,r),0!==n&&(e-i-h>0&&t[e-i-h-1][0]==DIFF_EQUAL?t[e-i-h-1][1]+=f.substring(0,n):(t.splice(0,0,[DIFF_EQUAL,f.substring(0,n)]),e++),f=f.substring(n),r=r.substring(n)),n=this.diff_commonSuffix(f,r),0!==n&&(t[e][1]=f.substring(f.length-n)+t[e][1],f=f.substring(0,f.length-n),r=r.substring(0,r.length-n))),0===i?t.splice(e-i-h,i+h,[DIFF_INSERT,f]):0===h?t.splice(e-i-h,i+h,[DIFF_DELETE,r]):t.splice(e-i-h,i+h,[DIFF_DELETE,r],[DIFF_INSERT,f]),e=e-i-h+(i?1:0)+(h?1:0)+1):0!==e&&t[e-1][0]==DIFF_EQUAL?(t[e-1][1]+=t[e][1],t.splice(e,1)):e++,h=0,i=0,r="",f=""}""===t[t.length-1][1]&&t.pop();var a=!1;for(e=1;e<t.length-1;)t[e-1][0]==DIFF_EQUAL&&t[e+1][0]==DIFF_EQUAL&&(t[e][1].substring(t[e][1].length-t[e-1][1].length)==t[e-1][1]?(t[e][1]=t[e-1][1]+t[e][1].substring(0,t[e][1].length-t[e-1][1].length),t[e+1][1]=t[e-1][1]+t[e+1][1],t.splice(e-1,1),a=!0):t[e][1].substring(0,t[e+1][1].length)==t[e+1][1]&&(t[e-1][1]+=t[e+1][1],t[e][1]=t[e][1].substring(t[e+1][1].length)+t[e+1][1],t.splice(e+1,1),a=!0)),e++;a&&this.diff_cleanupMerge(t)},diff_match_patch.prototype.diff_xIndex=function(t,n){var e,i=0,h=0,r=0,f=0;for(e=0;e<t.length&&(t[e][0]!==DIFF_INSERT&&(i+=t[e][1].length),t[e][0]!==DIFF_DELETE&&(h+=t[e][1].length),!(i>n));e++)r=i,f=h;return t.length!=e&&t[e][0]===DIFF_DELETE?f:f+(n-r)},diff_match_patch.prototype.diff_prettyHtml=function(t){for(var n=[],e=0,i=/&/g,h=/</g,r=/>/g,f=/\n/g,a=0;a<t.length;a++){var s=t[a][0],l=t[a][1],g=l.replace(i,"&amp;").replace(h,"&lt;").replace(r,"&gt;").replace(f,"&para;<br>");switch(s){case DIFF_INSERT:n[a]='<ins style="background:#e6ffe6;">'+g+"</ins>";break;case DIFF_DELETE:n[a]='<del style="background:#ffe6e6;">'+g+"</del>";break;case DIFF_EQUAL:n[a]="<span>"+g+"</span>"}s!==DIFF_DELETE&&(e+=l.length)}return n.join("")},diff_match_patch.prototype.diff_text1=function(t){for(var n=[],e=0;e<t.length;e++)t[e][0]!==DIFF_INSERT&&(n[e]=t[e][1]);return n.join("")},diff_match_patch.prototype.diff_text2=function(t){for(var n=[],e=0;e<t.length;e++)t[e][0]!==DIFF_DELETE&&(n[e]=t[e][1]);return n.join("")},diff_match_patch.prototype.diff_levenshtein=function(t){for(var n=0,e=0,i=0,h=0;h<t.length;h++){var r=t[h][0],f=t[h][1];switch(r){case DIFF_INSERT:e+=f.length;break;case DIFF_DELETE:i+=f.length;break;case DIFF_EQUAL:n+=Math.max(e,i),e=0,i=0}}return n+=Math.max(e,i)},diff_match_patch.prototype.diff_toDelta=function(t){for(var n=[],e=0;e<t.length;e++)switch(t[e][0]){case DIFF_INSERT:n[e]="+"+encodeURI(t[e][1]);break;case DIFF_DELETE:n[e]="-"+t[e][1].length;break;case DIFF_EQUAL:n[e]="="+t[e][1].length}return n.join("	").replace(/%20/g," ")},diff_match_patch.prototype.diff_fromDelta=function(t,n){for(var e=[],i=0,h=0,r=n.split(/\t/g),f=0;f<r.length;f++){var a=r[f].substring(1);switch(r[f].charAt(0)){case"+":try{e[i++]=[DIFF_INSERT,decodeURI(a)]}catch(s){throw new Error("Illegal escape in diff_fromDelta: "+a)}break;case"-":case"=":var l=parseInt(a,10);if(isNaN(l)||0>l)throw new Error("Invalid number in diff_fromDelta: "+a);var g=t.substring(h,h+=l);"="==r[f].charAt(0)?e[i++]=[DIFF_EQUAL,g]:e[i++]=[DIFF_DELETE,g];break;default:if(r[f])throw new Error("Invalid diff operation in diff_fromDelta: "+r[f])}}if(h!=t.length)throw new Error("Delta length ("+h+") does not equal source text length ("+t.length+").");return e},diff_match_patch.prototype.match_main=function(t,n,e){if(null==t||null==n||null==e)throw new Error("Null input. (match_main)");return e=Math.max(0,Math.min(e,t.length)),t==n?0:t.length?t.substring(e,e+n.length)==n?e:this.match_bitap_(t,n,e):-1},diff_match_patch.prototype.match_bitap_=function(t,n,e){function i(t,i){var h=t/n.length,f=Math.abs(e-i);return r.Match_Distance?h+f/r.Match_Distance:f?1:h}if(n.length>this.Match_MaxBits)throw new Error("Pattern too long for this browser.");var h=this.match_alphabet_(n),r=this,f=this.Match_Threshold,a=t.indexOf(n,e);-1!=a&&(f=Math.min(i(0,a),f),a=t.lastIndexOf(n,e+n.length),-1!=a&&(f=Math.min(i(0,a),f)));var s=1<<n.length-1;a=-1;for(var l,g,c,_=n.length+t.length,o=0;o<n.length;o++){for(l=0,g=_;g>l;)i(o,e+g)<=f?l=g:_=g,g=Math.floor((_-l)/2+l);_=g;var u=Math.max(1,e-g+1),p=Math.min(e+g,t.length)+n.length,d=Array(p+2);d[p+1]=(1<<o)-1;for(var F=p;F>=u;F--){var E=h[t.charAt(F-1)];if(0===o?d[F]=(d[F+1]<<1|1)&E:d[F]=(d[F+1]<<1|1)&E|((c[F+1]|c[F])<<1|1)|c[F+1],d[F]&s){var D=i(o,F-1);if(f>=D){if(f=D,a=F-1,!(a>e))break;u=Math.max(1,2*e-a)}}}if(i(o+1,e)>f)break;c=d}return a},diff_match_patch.prototype.match_alphabet_=function(t){for(var n={},e=0;e<t.length;e++)n[t.charAt(e)]=0;for(var e=0;e<t.length;e++)n[t.charAt(e)]|=1<<t.length-e-1;return n},diff_match_patch.prototype.patch_addContext_=function(t,n){if(0!=n.length){for(var e=n.substring(t.start2,t.start2+t.length1),i=0;n.indexOf(e)!=n.lastIndexOf(e)&&e.length<this.Match_MaxBits-this.Patch_Margin-this.Patch_Margin;)i+=this.Patch_Margin,e=n.substring(t.start2-i,t.start2+t.length1+i);i+=this.Patch_Margin;var h=n.substring(t.start2-i,t.start2);h&&t.diffs.unshift([DIFF_EQUAL,h]);var r=n.substring(t.start2+t.length1,t.start2+t.length1+i);r&&t.diffs.push([DIFF_EQUAL,r]),t.start1-=h.length,t.start2-=h.length,t.length1+=h.length+r.length,t.length2+=h.length+r.length}},diff_match_patch.prototype.patch_make=function(t,n,e){var i,h;if("string"==typeof t&&"string"==typeof n&&"undefined"==typeof e)i=t,h=this.diff_main(i,n,!0),h.length>2&&(this.diff_cleanupSemantic(h),this.diff_cleanupEfficiency(h));else if(t&&"object"==typeof t&&"undefined"==typeof n&&"undefined"==typeof e)h=t,i=this.diff_text1(h);else if("string"==typeof t&&n&&"object"==typeof n&&"undefined"==typeof e)i=t,h=n;else{if("string"!=typeof t||"string"!=typeof n||!e||"object"!=typeof e)throw new Error("Unknown call format to patch_make.");i=t,h=e}if(0===h.length)return[];for(var r=[],f=new diff_match_patch.patch_obj,a=0,s=0,l=0,g=i,c=i,_=0;_<h.length;_++){var o=h[_][0],u=h[_][1];switch(a||o===DIFF_EQUAL||(f.start1=s,f.start2=l),o){case DIFF_INSERT:f.diffs[a++]=h[_],f.length2+=u.length,c=c.substring(0,l)+u+c.substring(l);break;case DIFF_DELETE:f.length1+=u.length,f.diffs[a++]=h[_],c=c.substring(0,l)+c.substring(l+u.length);break;case DIFF_EQUAL:u.length<=2*this.Patch_Margin&&a&&h.length!=_+1?(f.diffs[a++]=h[_],f.length1+=u.length,f.length2+=u.length):u.length>=2*this.Patch_Margin&&a&&(this.patch_addContext_(f,g),r.push(f),f=new diff_match_patch.patch_obj,a=0,g=c,s=l)}o!==DIFF_INSERT&&(s+=u.length),o!==DIFF_DELETE&&(l+=u.length)}return a&&(this.patch_addContext_(f,g),r.push(f)),r},diff_match_patch.prototype.patch_deepCopy=function(t){for(var n=[],e=0;e<t.length;e++){var i=t[e],h=new diff_match_patch.patch_obj;h.diffs=[];for(var r=0;r<i.diffs.length;r++)h.diffs[r]=i.diffs[r].slice();h.start1=i.start1,h.start2=i.start2,h.length1=i.length1,h.length2=i.length2,n[e]=h}return n},diff_match_patch.prototype.patch_apply=function(t,n){if(0==t.length)return[n,[]];t=this.patch_deepCopy(t);var e=this.patch_addPadding(t);n=e+n+e,this.patch_splitMax(t);for(var i=0,h=[],r=0;r<t.length;r++){var f,a=t[r].start2+i,s=this.diff_text1(t[r].diffs),l=-1;if(s.length>this.Match_MaxBits?(f=this.match_main(n,s.substring(0,this.Match_MaxBits),a),-1!=f&&(l=this.match_main(n,s.substring(s.length-this.Match_MaxBits),a+s.length-this.Match_MaxBits),(-1==l||f>=l)&&(f=-1))):f=this.match_main(n,s,a),-1==f)h[r]=!1,i-=t[r].length2-t[r].length1;else{h[r]=!0,i=f-a;var g;if(g=-1==l?n.substring(f,f+s.length):n.substring(f,l+this.Match_MaxBits),s==g)n=n.substring(0,f)+this.diff_text2(t[r].diffs)+n.substring(f+s.length);else{var c=this.diff_main(s,g,!1);if(s.length>this.Match_MaxBits&&this.diff_levenshtein(c)/s.length>this.Patch_DeleteThreshold)h[r]=!1;else{this.diff_cleanupSemanticLossless(c);for(var _,o=0,u=0;u<t[r].diffs.length;u++){var p=t[r].diffs[u];p[0]!==DIFF_EQUAL&&(_=this.diff_xIndex(c,o)),p[0]===DIFF_INSERT?n=n.substring(0,f+_)+p[1]+n.substring(f+_):p[0]===DIFF_DELETE&&(n=n.substring(0,f+_)+n.substring(f+this.diff_xIndex(c,o+p[1].length))),p[0]!==DIFF_DELETE&&(o+=p[1].length)}}}}}return n=n.substring(e.length,n.length-e.length),[n,h]},diff_match_patch.prototype.patch_addPadding=function(t){for(var n=this.Patch_Margin,e="",i=1;n>=i;i++)e+=String.fromCharCode(i);for(var i=0;i<t.length;i++)t[i].start1+=n,t[i].start2+=n;var h=t[0],r=h.diffs;if(0==r.length||r[0][0]!=DIFF_EQUAL)r.unshift([DIFF_EQUAL,e]),h.start1-=n,h.start2-=n,h.length1+=n,h.length2+=n;else if(n>r[0][1].length){var f=n-r[0][1].length;r[0][1]=e.substring(r[0][1].length)+r[0][1],h.start1-=f,h.start2-=f,h.length1+=f,h.length2+=f}if(h=t[t.length-1],r=h.diffs,0==r.length||r[r.length-1][0]!=DIFF_EQUAL)r.push([DIFF_EQUAL,e]),h.length1+=n,h.length2+=n;else if(n>r[r.length-1][1].length){var f=n-r[r.length-1][1].length;r[r.length-1][1]+=e.substring(0,f),h.length1+=f,h.length2+=f}return e},diff_match_patch.prototype.patch_splitMax=function(t){for(var n=this.Match_MaxBits,e=0;e<t.length;e++)if(t[e].length1>n){var i=t[e];t.splice(e--,1);for(var h=i.start1,r=i.start2,f="";0!==i.diffs.length;){var a=new diff_match_patch.patch_obj,s=!0;for(a.start1=h-f.length,a.start2=r-f.length,""!==f&&(a.length1=a.length2=f.length,a.diffs.push([DIFF_EQUAL,f]));0!==i.diffs.length&&a.length1<n-this.Patch_Margin;){var l=i.diffs[0][0],g=i.diffs[0][1];l===DIFF_INSERT?(a.length2+=g.length,r+=g.length,a.diffs.push(i.diffs.shift()),s=!1):l===DIFF_DELETE&&1==a.diffs.length&&a.diffs[0][0]==DIFF_EQUAL&&g.length>2*n?(a.length1+=g.length,h+=g.length,s=!1,a.diffs.push([l,g]),i.diffs.shift()):(g=g.substring(0,n-a.length1-this.Patch_Margin),a.length1+=g.length,h+=g.length,l===DIFF_EQUAL?(a.length2+=g.length,r+=g.length):s=!1,a.diffs.push([l,g]),g==i.diffs[0][1]?i.diffs.shift():i.diffs[0][1]=i.diffs[0][1].substring(g.length))}f=this.diff_text2(a.diffs),f=f.substring(f.length-this.Patch_Margin);var c=this.diff_text1(i.diffs).substring(0,this.Patch_Margin);""!==c&&(a.length1+=c.length,a.length2+=c.length,0!==a.diffs.length&&a.diffs[a.diffs.length-1][0]===DIFF_EQUAL?a.diffs[a.diffs.length-1][1]+=c:a.diffs.push([DIFF_EQUAL,c])),s||t.splice(++e,0,a)}}},diff_match_patch.prototype.patch_toText=function(t){for(var n=[],e=0;e<t.length;e++)n[e]=t[e];return n.join("")},diff_match_patch.prototype.patch_fromText=function(t){var n=[];if(!t)return n;for(var e=t.split("\n"),i=0,h=/^@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@$/;i<e.length;){var r=e[i].match(h);if(!r)throw new Error("Invalid patch string: "+e[i]);var f=new diff_match_patch.patch_obj;for(n.push(f),f.start1=parseInt(r[1],10),""===r[2]?(f.start1--,f.length1=1):"0"==r[2]?f.length1=0:(f.start1--,f.length1=parseInt(r[2],10)),f.start2=parseInt(r[3],10),""===r[4]?(f.start2--,f.length2=1):"0"==r[4]?f.length2=0:(f.start2--,f.length2=parseInt(r[4],10)),i++;i<e.length;){var a=e[i].charAt(0);try{var s=decodeURI(e[i].substring(1))}catch(l){throw new Error("Illegal escape in patch_fromText: "+s)}if("-"==a)f.diffs.push([DIFF_DELETE,s]);else if("+"==a)f.diffs.push([DIFF_INSERT,s]);else if(" "==a)f.diffs.push([DIFF_EQUAL,s]);else{if("@"==a)break;if(""!==a)throw new Error('Invalid patch mode "'+a+'" in: '+s)}i++}}return n},diff_match_patch.patch_obj=function(){this.diffs=[],this.start1=null,this.start2=null,this.length1=0,this.length2=0},diff_match_patch.patch_obj.prototype.toString=function(){var t,n;t=0===this.length1?this.start1+",0":1==this.length1?this.start1+1:this.start1+1+","+this.length1,n=0===this.length2?this.start2+",0":1==this.length2?this.start2+1:this.start2+1+","+this.length2;for(var e,i=["@@ -"+t+" +"+n+" @@\n"],h=0;h<this.diffs.length;h++){switch(this.diffs[h][0]){case DIFF_INSERT:e="+";break;case DIFF_DELETE:e="-";break;case DIFF_EQUAL:e=" "}i[h+1]=e+encodeURI(this.diffs[h][1])+"\n"}return i.join("").replace(/%20/g," ")},this.diff_match_patch=diff_match_patch,this.DIFF_DELETE=DIFF_DELETE,this.DIFF_INSERT=DIFF_INSERT,this.DIFF_EQUAL=DIFF_EQUAL;
+},{}],3:[function(require,module,exports){
+function cloneRegExp(r){var e=/^\/(.*)\/([gimyu]*)$/.exec(r.toString());return new RegExp(e[1],e[2])}function clone(r){if("object"!=typeof r)return r;if(null===r)return null;if(isArray(r))return r.map(clone);if(r instanceof Date)return new Date(r.getTime());if(r instanceof RegExp)return cloneRegExp(r);var e={};for(var n in r)Object.prototype.hasOwnProperty.call(r,n)&&(e[n]=clone(r[n]));return e}var isArray="function"==typeof Array.isArray?Array.isArray:function(r){return r instanceof Array};module.exports=clone;
+},{}],4:[function(require,module,exports){
+var Pipe=require("../pipe").Pipe,Context=function(){};Context.prototype.setResult=function(t){return this.result=t,this.hasResult=!0,this},Context.prototype.exit=function(){return this.exiting=!0,this},Context.prototype.switchTo=function(t,e){return"string"==typeof t||t instanceof Pipe?this.nextPipe=t:(this.next=t,e&&(this.nextPipe=e)),this},Context.prototype.push=function(t,e){return t.parent=this,"undefined"!=typeof e&&(t.childName=e),t.root=this.root||this,t.options=t.options||this.options,this.children?(this.children[this.children.length-1].next=t,this.children.push(t)):(this.children=[t],this.nextAfterChildren=this.next||null,this.next=t),t.next=this,this},exports.Context=Context;
+},{"../pipe":18}],5:[function(require,module,exports){
+var Context=require("./context").Context,defaultClone=require("../clone"),DiffContext=function(t,e){this.left=t,this.right=e,this.pipe="diff"};DiffContext.prototype=new Context,DiffContext.prototype.setResult=function(t){if(this.options.cloneDiffValues&&"object"==typeof t){var e="function"==typeof this.options.cloneDiffValues?this.options.cloneDiffValues:defaultClone;"object"==typeof t[0]&&(t[0]=e(t[0])),"object"==typeof t[1]&&(t[1]=e(t[1]))}return Context.prototype.setResult.apply(this,arguments)},exports.DiffContext=DiffContext;
+},{"../clone":3,"./context":4}],6:[function(require,module,exports){
+var Context=require("./context").Context,PatchContext=function(t,e){this.left=t,this.delta=e,this.pipe="patch"};PatchContext.prototype=new Context,exports.PatchContext=PatchContext;
+},{"./context":4}],7:[function(require,module,exports){
+var Context=require("./context").Context,ReverseContext=function(e){this.delta=e,this.pipe="reverse"};ReverseContext.prototype=new Context,exports.ReverseContext=ReverseContext;
+},{"./context":4}],8:[function(require,module,exports){
+module.exports=function(d,e){var t;return"string"==typeof e&&(t=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d*))?(Z|([+\-])(\d{2}):(\d{2}))$/.exec(e))?new Date(Date.UTC(+t[1],+t[2]-1,+t[3],+t[4],+t[5],+t[6],+(t[7]||0))):e};
+},{}],9:[function(require,module,exports){
+var Processor=require("./processor").Processor,Pipe=require("./pipe").Pipe,DiffContext=require("./contexts/diff").DiffContext,PatchContext=require("./contexts/patch").PatchContext,ReverseContext=require("./contexts/reverse").ReverseContext,clone=require("./clone"),trivial=require("./filters/trivial"),nested=require("./filters/nested"),arrays=require("./filters/arrays"),dates=require("./filters/dates"),texts=require("./filters/texts"),DiffPatcher=function(e){this.processor=new Processor(e),this.processor.pipe(new Pipe("diff").append(nested.collectChildrenDiffFilter,trivial.diffFilter,dates.diffFilter,texts.diffFilter,nested.objectsDiffFilter,arrays.diffFilter).shouldHaveResult()),this.processor.pipe(new Pipe("patch").append(nested.collectChildrenPatchFilter,arrays.collectChildrenPatchFilter,trivial.patchFilter,texts.patchFilter,nested.patchFilter,arrays.patchFilter).shouldHaveResult()),this.processor.pipe(new Pipe("reverse").append(nested.collectChildrenReverseFilter,arrays.collectChildrenReverseFilter,trivial.reverseFilter,texts.reverseFilter,nested.reverseFilter,arrays.reverseFilter).shouldHaveResult())};DiffPatcher.prototype.options=function(){return this.processor.options.apply(this.processor,arguments)},DiffPatcher.prototype.diff=function(e,r){return this.processor.process(new DiffContext(e,r))},DiffPatcher.prototype.patch=function(e,r){return this.processor.process(new PatchContext(e,r))},DiffPatcher.prototype.reverse=function(e){return this.processor.process(new ReverseContext(e))},DiffPatcher.prototype.unpatch=function(e,r){return this.patch(e,this.reverse(r))},DiffPatcher.prototype.clone=function(e){return clone(e)},exports.DiffPatcher=DiffPatcher;
+},{"./clone":3,"./contexts/diff":5,"./contexts/patch":6,"./contexts/reverse":7,"./filters/arrays":11,"./filters/dates":12,"./filters/nested":14,"./filters/texts":15,"./filters/trivial":16,"./pipe":18,"./processor":19}],10:[function(require,module,exports){
+exports.isBrowser="undefined"!=typeof window;
+},{}],11:[function(require,module,exports){
+function arraysHaveMatchByRef(e,t,r,i){for(var a=0;r>a;a++)for(var n=e[a],l=0;i>l;l++){var s=t[l];if(a!==l&&n===s)return!0}}function matchItems(e,t,r,i,a){var n=e[r],l=t[i];if(n===l)return!0;if("object"!=typeof n||"object"!=typeof l)return!1;var s=a.objectHash;if(!s)return a.matchByPosition&&r===i;var o,f;return"number"==typeof r?(a.hashCache1=a.hashCache1||[],o=a.hashCache1[r],"undefined"==typeof o&&(a.hashCache1[r]=o=s(n,r))):o=s(n),"undefined"==typeof o?!1:("number"==typeof i?(a.hashCache2=a.hashCache2||[],f=a.hashCache2[i],"undefined"==typeof f&&(a.hashCache2[i]=f=s(l,i))):f=s(l),"undefined"==typeof f?!1:o===f)}var DiffContext=require("../contexts/diff").DiffContext,PatchContext=require("../contexts/patch").PatchContext,ReverseContext=require("../contexts/reverse").ReverseContext,lcs=require("./lcs"),ARRAY_MOVE=3,isArray="function"==typeof Array.isArray?Array.isArray:function(e){return e instanceof Array},arrayIndexOf="function"==typeof Array.prototype.indexOf?function(e,t){return e.indexOf(t)}:function(e,t){for(var r=e.length,i=0;r>i;i++)if(e[i]===t)return i;return-1},diffFilter=function(e){if(e.leftIsArray){var t,r,i,a,n={objectHash:e.options&&e.options.objectHash,matchByPosition:e.options&&e.options.matchByPosition},l=0,s=0,o=e.left,f=e.right,c=o.length,h=f.length;for(c>0&&h>0&&!n.objectHash&&"boolean"!=typeof n.matchByPosition&&(n.matchByPosition=!arraysHaveMatchByRef(o,f,c,h));c>l&&h>l&&matchItems(o,f,l,l,n);)t=l,a=new DiffContext(e.left[t],e.right[t]),e.push(a,t),l++;for(;c>s+l&&h>s+l&&matchItems(o,f,c-1-s,h-1-s,n);)r=c-1-s,i=h-1-s,a=new DiffContext(e.left[r],e.right[i]),e.push(a,i),s++;var u;if(l+s===c){if(c===h)return void e.setResult(void 0).exit();for(u=u||{_t:"a"},t=l;h-s>t;t++)u[t]=[f[t]];return void e.setResult(u).exit()}if(l+s===h){for(u=u||{_t:"a"},t=l;c-s>t;t++)u["_"+t]=[o[t],0,0];return void e.setResult(u).exit()}delete n.hashCache1,delete n.hashCache2;var d=o.slice(l,c-s),v=f.slice(l,h-s),p=lcs.get(d,v,matchItems,n),y=[];for(u=u||{_t:"a"},t=l;c-s>t;t++)arrayIndexOf(p.indices1,t-l)<0&&(u["_"+t]=[o[t],0,0],y.push(t));var x=!0;e.options&&e.options.arrays&&e.options.arrays.detectMove===!1&&(x=!1);var m=!1;e.options&&e.options.arrays&&e.options.arrays.includeValueOnMove&&(m=!0);var C=y.length;for(t=l;h-s>t;t++){var R=arrayIndexOf(p.indices2,t-l);if(0>R){var A=!1;if(x&&C>0)for(var _=0;C>_;_++)if(r=y[_],matchItems(d,v,r-l,t-l,n)){u["_"+r].splice(1,2,t,ARRAY_MOVE),m||(u["_"+r][0]=""),i=t,a=new DiffContext(e.left[r],e.right[i]),e.push(a,i),y.splice(_,1),A=!0;break}A||(u[t]=[f[t]])}else r=p.indices1[R]+l,i=p.indices2[R]+l,a=new DiffContext(e.left[r],e.right[i]),e.push(a,i)}e.setResult(u).exit()}};diffFilter.filterName="arrays";var compare={numerically:function(e,t){return e-t},numericallyBy:function(e){return function(t,r){return t[e]-r[e]}}},patchFilter=function(e){if(e.nested&&"a"===e.delta._t){var t,r,i=e.delta,a=e.left,n=[],l=[],s=[];for(t in i)if("_t"!==t)if("_"===t[0]){if(0!==i[t][2]&&i[t][2]!==ARRAY_MOVE)throw new Error("only removal or move can be applied at original array indices, invalid diff type: "+i[t][2]);n.push(parseInt(t.slice(1),10))}else 1===i[t].length?l.push({index:parseInt(t,10),value:i[t][0]}):s.push({index:parseInt(t,10),delta:i[t]});for(n=n.sort(compare.numerically),t=n.length-1;t>=0;t--){r=n[t];var o=i["_"+r],f=a.splice(r,1)[0];o[2]===ARRAY_MOVE&&l.push({index:o[1],value:f})}l=l.sort(compare.numericallyBy("index"));var c=l.length;for(t=0;c>t;t++){var h=l[t];a.splice(h.index,0,h.value)}var u,d=s.length;if(d>0)for(t=0;d>t;t++){var v=s[t];u=new PatchContext(e.left[v.index],v.delta),e.push(u,v.index)}return e.children?void e.exit():void e.setResult(e.left).exit()}};patchFilter.filterName="arrays";var collectChildrenPatchFilter=function(e){if(e&&e.children&&"a"===e.delta._t){for(var t,r=e.children.length,i=0;r>i;i++)t=e.children[i],e.left[t.childName]=t.result;e.setResult(e.left).exit()}};collectChildrenPatchFilter.filterName="arraysCollectChildren";var reverseFilter=function(e){if(!e.nested)return void(e.delta[2]===ARRAY_MOVE&&(e.newName="_"+e.delta[1],e.setResult([e.delta[0],parseInt(e.childName.substr(1),10),ARRAY_MOVE]).exit()));if("a"===e.delta._t){var t,r;for(t in e.delta)"_t"!==t&&(r=new ReverseContext(e.delta[t]),e.push(r,t));e.exit()}};reverseFilter.filterName="arrays";var reverseArrayDeltaIndex=function(e,t,r){if("string"==typeof t&&"_"===t[0])return parseInt(t.substr(1),10);if(isArray(r)&&0===r[2])return"_"+t;var i=+t;for(var a in e){var n=e[a];if(isArray(n))if(n[2]===ARRAY_MOVE){var l=parseInt(a.substr(1),10),s=n[1];if(s===+t)return l;i>=l&&s>i?i++:l>=i&&i>s&&i--}else if(0===n[2]){var o=parseInt(a.substr(1),10);i>=o&&i++}else 1===n.length&&i>=a&&i--}return i},collectChildrenReverseFilter=function(e){if(e&&e.children&&"a"===e.delta._t){for(var t,r=e.children.length,i={_t:"a"},a=0;r>a;a++){t=e.children[a];var n=t.newName;"undefined"==typeof n&&(n=reverseArrayDeltaIndex(e.delta,t.childName,t.result)),i[n]!==t.result&&(i[n]=t.result)}e.setResult(i).exit()}};collectChildrenReverseFilter.filterName="arraysCollectChildren",exports.diffFilter=diffFilter,exports.patchFilter=patchFilter,exports.collectChildrenPatchFilter=collectChildrenPatchFilter,exports.reverseFilter=reverseFilter,exports.collectChildrenReverseFilter=collectChildrenReverseFilter;
+},{"../contexts/diff":5,"../contexts/patch":6,"../contexts/reverse":7,"./lcs":13}],12:[function(require,module,exports){
+var diffFilter=function(t){t.left instanceof Date?(t.right instanceof Date?t.left.getTime()!==t.right.getTime()?t.setResult([t.left,t.right]):t.setResult(void 0):t.setResult([t.left,t.right]),t.exit()):t.right instanceof Date&&t.setResult([t.left,t.right]).exit()};diffFilter.filterName="dates",exports.diffFilter=diffFilter;
+},{}],13:[function(require,module,exports){
+var defaultMatch=function(t,e,n,r){return t[n]===e[r]},lengthMatrix=function(t,e,n,r){var c,a,i=t.length,u=e.length,f=[i+1];for(c=0;i+1>c;c++)for(f[c]=[u+1],a=0;u+1>a;a++)f[c][a]=0;for(f.match=n,c=1;i+1>c;c++)for(a=1;u+1>a;a++)n(t,e,c-1,a-1,r)?f[c][a]=f[c-1][a-1]+1:f[c][a]=Math.max(f[c-1][a],f[c][a-1]);return f},backtrack=function(t,e,n,r,c,a){if(0===r||0===c)return{sequence:[],indices1:[],indices2:[]};if(t.match(e,n,r-1,c-1,a)){var i=backtrack(t,e,n,r-1,c-1,a);return i.sequence.push(e[r-1]),i.indices1.push(r-1),i.indices2.push(c-1),i}return t[r][c-1]>t[r-1][c]?backtrack(t,e,n,r,c-1,a):backtrack(t,e,n,r-1,c,a)},get=function(t,e,n,r){r=r||{};var c=lengthMatrix(t,e,n||defaultMatch,r),a=backtrack(c,t,e,t.length,e.length,r);return"string"==typeof t&&"string"==typeof e&&(a.sequence=a.sequence.join("")),a};exports.get=get;
+},{}],14:[function(require,module,exports){
+var DiffContext=require("../contexts/diff").DiffContext,PatchContext=require("../contexts/patch").PatchContext,ReverseContext=require("../contexts/reverse").ReverseContext,collectChildrenDiffFilter=function(e){if(e&&e.children){for(var t,l=e.children.length,r=e.result,i=0;l>i;i++)t=e.children[i],"undefined"!=typeof t.result&&(r=r||{},r[t.childName]=t.result);r&&e.leftIsArray&&(r._t="a"),e.setResult(r).exit()}};collectChildrenDiffFilter.filterName="collectChildren";var objectsDiffFilter=function(e){if(!e.leftIsArray&&"object"===e.leftType){var t,l,r=e.options.propertyFilter;for(t in e.left)Object.prototype.hasOwnProperty.call(e.left,t)&&(r&&!r(t,e)||(l=new DiffContext(e.left[t],e.right[t]),e.push(l,t)));for(t in e.right)Object.prototype.hasOwnProperty.call(e.right,t)&&(r&&!r(t,e)||"undefined"==typeof e.left[t]&&(l=new DiffContext(void 0,e.right[t]),e.push(l,t)));return e.children&&0!==e.children.length?void e.exit():void e.setResult(void 0).exit()}};objectsDiffFilter.filterName="objects";var patchFilter=function(e){if(e.nested&&!e.delta._t){var t,l;for(t in e.delta)l=new PatchContext(e.left[t],e.delta[t]),e.push(l,t);e.exit()}};patchFilter.filterName="objects";var collectChildrenPatchFilter=function(e){if(e&&e.children&&!e.delta._t){for(var t,l=e.children.length,r=0;l>r;r++)t=e.children[r],Object.prototype.hasOwnProperty.call(e.left,t.childName)&&void 0===t.result?delete e.left[t.childName]:e.left[t.childName]!==t.result&&(e.left[t.childName]=t.result);e.setResult(e.left).exit()}};collectChildrenPatchFilter.filterName="collectChildren";var reverseFilter=function(e){if(e.nested&&!e.delta._t){var t,l;for(t in e.delta)l=new ReverseContext(e.delta[t]),e.push(l,t);e.exit()}};reverseFilter.filterName="objects";var collectChildrenReverseFilter=function(e){if(e&&e.children&&!e.delta._t){for(var t,l=e.children.length,r={},i=0;l>i;i++)t=e.children[i],r[t.childName]!==t.result&&(r[t.childName]=t.result);e.setResult(r).exit()}};collectChildrenReverseFilter.filterName="collectChildren",exports.collectChildrenDiffFilter=collectChildrenDiffFilter,exports.objectsDiffFilter=objectsDiffFilter,exports.patchFilter=patchFilter,exports.collectChildrenPatchFilter=collectChildrenPatchFilter,exports.reverseFilter=reverseFilter,exports.collectChildrenReverseFilter=collectChildrenReverseFilter;
+},{"../contexts/diff":5,"../contexts/patch":6,"../contexts/reverse":7}],15:[function(require,module,exports){
+var TEXT_DIFF=2,DEFAULT_MIN_LENGTH=60,cachedDiffPatch=null,getDiffMatchPatch=function(t){if(!cachedDiffPatch){var e;if("undefined"!=typeof diff_match_patch)e="function"==typeof diff_match_patch?new diff_match_patch:new diff_match_patch.diff_match_patch;else if("function"==typeof require)try{var i="diff_match_patch_uncompressed",f=require("../../public/external/"+i);e=new f.diff_match_patch}catch(r){e=null}if(!e){if(!t)return null;var a=new Error("text diff_match_patch library not found");throw a.diff_match_patch_not_found=!0,a}cachedDiffPatch={diff:function(t,i){return e.patch_toText(e.patch_make(t,i))},patch:function(t,i){for(var f=e.patch_apply(e.patch_fromText(i),t),r=0;r<f[1].length;r++)if(!f[1][r]){var a=new Error("text patch failed");a.textPatchFailed=!0}return f[0]}}}return cachedDiffPatch},diffFilter=function(t){if("string"===t.leftType){var e=t.options&&t.options.textDiff&&t.options.textDiff.minLength||DEFAULT_MIN_LENGTH;if(t.left.length<e||t.right.length<e)return void t.setResult([t.left,t.right]).exit();var i=getDiffMatchPatch();if(!i)return void t.setResult([t.left,t.right]).exit();var f=i.diff;t.setResult([f(t.left,t.right),0,TEXT_DIFF]).exit()}};diffFilter.filterName="texts";var patchFilter=function(t){if(!t.nested&&t.delta[2]===TEXT_DIFF){var e=getDiffMatchPatch(!0).patch;t.setResult(e(t.left,t.delta[0])).exit()}};patchFilter.filterName="texts";var textDeltaReverse=function(t){var e,i,f,r,a,c,l,n,h=null,d=/^@@ +\-(\d+),(\d+) +\+(\d+),(\d+) +@@$/;for(f=t.split("\n"),e=0,i=f.length;i>e;e++){r=f[e];var o=r.slice(0,1);"@"===o?(h=d.exec(r),c=e,l=null,n=null,f[c]="@@ -"+h[3]+","+h[4]+" +"+h[1]+","+h[2]+" @@"):"+"===o?(l=e,f[e]="-"+f[e].slice(1),"+"===f[e-1].slice(0,1)&&(a=f[e],f[e]=f[e-1],f[e-1]=a)):"-"===o&&(n=e,f[e]="+"+f[e].slice(1))}return f.join("\n")},reverseFilter=function(t){t.nested||t.delta[2]===TEXT_DIFF&&t.setResult([textDeltaReverse(t.delta[0]),0,TEXT_DIFF]).exit()};reverseFilter.filterName="texts",exports.diffFilter=diffFilter,exports.patchFilter=patchFilter,exports.reverseFilter=reverseFilter;
+},{}],16:[function(require,module,exports){
+var isArray="function"==typeof Array.isArray?Array.isArray:function(e){return e instanceof Array},diffFilter=function(e){if(e.left===e.right)return void e.setResult(void 0).exit();if("undefined"==typeof e.left){if("function"==typeof e.right)throw new Error("functions are not supported");return void e.setResult([e.right]).exit()}if("undefined"==typeof e.right)return void e.setResult([e.left,0,0]).exit();if("function"==typeof e.left||"function"==typeof e.right)throw new Error("functions are not supported");if(e.leftType=null===e.left?"null":typeof e.left,e.rightType=null===e.right?"null":typeof e.right,e.leftType!==e.rightType)return void e.setResult([e.left,e.right]).exit();if("boolean"===e.leftType||"number"===e.leftType)return void e.setResult([e.left,e.right]).exit();if("object"===e.leftType&&(e.leftIsArray=isArray(e.left)),"object"===e.rightType&&(e.rightIsArray=isArray(e.right)),e.leftIsArray!==e.rightIsArray)return void e.setResult([e.left,e.right]).exit();if(e.left instanceof RegExp){if(!(e.right instanceof RegExp))return void e.setResult([e.left,e.right]).exit();e.setResult([e.left.toString(),e.right.toString()]).exit()}};diffFilter.filterName="trivial";var patchFilter=function(e){if("undefined"==typeof e.delta)return void e.setResult(e.left).exit();if(e.nested=!isArray(e.delta),!e.nested){if(1===e.delta.length)return void e.setResult(e.delta[0]).exit();if(2===e.delta.length){if(e.left instanceof RegExp){var t=/^\/(.*)\/([gimyu]+)$/.exec(e.delta[1]);if(t)return void e.setResult(new RegExp(t[1],t[2])).exit()}return void e.setResult(e.delta[1]).exit()}return 3===e.delta.length&&0===e.delta[2]?void e.setResult(void 0).exit():void 0}};patchFilter.filterName="trivial";var reverseFilter=function(e){return"undefined"==typeof e.delta?void e.setResult(e.delta).exit():(e.nested=!isArray(e.delta),e.nested?void 0:1===e.delta.length?void e.setResult([e.delta[0],0,0]).exit():2===e.delta.length?void e.setResult([e.delta[1],e.delta[0]]).exit():3===e.delta.length&&0===e.delta[2]?void e.setResult([e.delta[0]]).exit():void 0)};reverseFilter.filterName="trivial",exports.diffFilter=diffFilter,exports.patchFilter=patchFilter,exports.reverseFilter=reverseFilter;
+},{}],17:[function(require,module,exports){
+var environment=require("./environment"),DiffPatcher=require("./diffpatcher").DiffPatcher;exports.DiffPatcher=DiffPatcher,exports.create=function(e){return new DiffPatcher(e)},exports.dateReviver=require("./date-reviver");var defaultInstance;if(exports.diff=function(){return defaultInstance||(defaultInstance=new DiffPatcher),defaultInstance.diff.apply(defaultInstance,arguments)},exports.patch=function(){return defaultInstance||(defaultInstance=new DiffPatcher),defaultInstance.patch.apply(defaultInstance,arguments)},exports.unpatch=function(){return defaultInstance||(defaultInstance=new DiffPatcher),defaultInstance.unpatch.apply(defaultInstance,arguments)},exports.reverse=function(){return defaultInstance||(defaultInstance=new DiffPatcher),defaultInstance.reverse.apply(defaultInstance,arguments)},exports.clone=function(){return defaultInstance||(defaultInstance=new DiffPatcher),defaultInstance.clone.apply(defaultInstance,arguments)},environment.isBrowser)exports.homepage="https://github.com/benjamine/jsondiffpatch",exports.version="0.2.4";else{var packageInfoModuleName="../package.json",packageInfo=require(packageInfoModuleName);exports.homepage=packageInfo.homepage,exports.version=packageInfo.version;var formatterModuleName="./formatters",formatters=require(formatterModuleName);exports.formatters=formatters,exports.console=formatters.console}
+},{"./date-reviver":8,"./diffpatcher":9,"./environment":10}],18:[function(require,module,exports){
+var Pipe=function(t){this.name=t,this.filters=[]};Pipe.prototype.process=function(t){if(!this.processor)throw new Error("add this pipe to a processor before using it");for(var e=this.debug,r=this.filters.length,i=t,s=0;r>s;s++){var o=this.filters[s];if(e&&this.log("filter: "+o.filterName),o(i),"object"==typeof i&&i.exiting){i.exiting=!1;break}}!i.next&&this.resultCheck&&this.resultCheck(i)},Pipe.prototype.log=function(t){console.log("[jsondiffpatch] "+this.name+" pipe, "+t)},Pipe.prototype.append=function(){return this.filters.push.apply(this.filters,arguments),this},Pipe.prototype.prepend=function(){return this.filters.unshift.apply(this.filters,arguments),this},Pipe.prototype.indexOf=function(t){if(!t)throw new Error("a filter name is required");for(var e=0;e<this.filters.length;e++){var r=this.filters[e];if(r.filterName===t)return e}throw new Error("filter not found: "+t)},Pipe.prototype.list=function(){for(var t=[],e=0;e<this.filters.length;e++){var r=this.filters[e];t.push(r.filterName)}return t},Pipe.prototype.after=function(t){var e=this.indexOf(t),r=Array.prototype.slice.call(arguments,1);if(!r.length)throw new Error("a filter is required");return r.unshift(e+1,0),Array.prototype.splice.apply(this.filters,r),this},Pipe.prototype.before=function(t){var e=this.indexOf(t),r=Array.prototype.slice.call(arguments,1);if(!r.length)throw new Error("a filter is required");return r.unshift(e,0),Array.prototype.splice.apply(this.filters,r),this},Pipe.prototype.clear=function(){return this.filters.length=0,this},Pipe.prototype.shouldHaveResult=function(t){if(t===!1)return void(this.resultCheck=null);if(!this.resultCheck){var e=this;return this.resultCheck=function(t){if(!t.hasResult){console.log(t);var r=new Error(e.name+" failed");throw r.noResult=!0,r}},this}},exports.Pipe=Pipe;
+},{}],19:[function(require,module,exports){
+var Processor=function(e){this.selfOptions=e||{},this.pipes={}};Processor.prototype.options=function(e){return e&&(this.selfOptions=e),this.selfOptions},Processor.prototype.pipe=function(e,t){if("string"==typeof e){if("undefined"==typeof t)return this.pipes[e];this.pipes[e]=t}if(e&&e.name){if(t=e,t.processor===this)return t;this.pipes[t.name]=t}return t.processor=this,t},Processor.prototype.process=function(e,t){var s=e;s.options=this.options();for(var r,o,i=t||e.pipe||"default";i;)"undefined"!=typeof s.nextAfterChildren&&(s.next=s.nextAfterChildren,s.nextAfterChildren=null),"string"==typeof i&&(i=this.pipe(i)),i.process(s),o=s,r=i,i=null,s&&s.next&&(s=s.next,i=o.nextPipe||s.pipe||r);return s.hasResult?s.result:void 0},exports.Processor=Processor;
+},{}]},{},[1])(1)
+});
+
+
+//# sourceMappingURL=jsondiffpatch-full.min.map</script>
+<script src="data:application/javascript;base64,IWZ1bmN0aW9uKGUpe2lmKCJvYmplY3QiPT10eXBlb2YgZXhwb3J0cyYmInVuZGVmaW5lZCIhPXR5cGVvZiBtb2R1bGUpbW9kdWxlLmV4cG9ydHM9ZSgpO2Vsc2UgaWYoImZ1bmN0aW9uIj09dHlwZW9mIGRlZmluZSYmZGVmaW5lLmFtZClkZWZpbmUoW10sZSk7ZWxzZXt2YXIgZjsidW5kZWZpbmVkIiE9dHlwZW9mIHdpbmRvdz9mPXdpbmRvdzoidW5kZWZpbmVkIiE9dHlwZW9mIGdsb2JhbD9mPWdsb2JhbDoidW5kZWZpbmVkIiE9dHlwZW9mIHNlbGYmJihmPXNlbGYpLChmLmpzb25kaWZmcGF0Y2h8fChmLmpzb25kaWZmcGF0Y2g9e30pKS5mb3JtYXR0ZXJzPWUoKX19KGZ1bmN0aW9uKCl7dmFyIGRlZmluZSxtb2R1bGUsZXhwb3J0cztyZXR1cm4gKGZ1bmN0aW9uIGUodCxuLHIpe2Z1bmN0aW9uIHMobyx1KXtpZighbltvXSl7aWYoIXRbb10pe3ZhciBhPXR5cGVvZiByZXF1aXJlPT0iZnVuY3Rpb24iJiZyZXF1aXJlO2lmKCF1JiZhKXJldHVybiBhKG8sITApO2lmKGkpcmV0dXJuIGkobywhMCk7dmFyIGY9bmV3IEVycm9yKCJDYW5ub3QgZmluZCBtb2R1bGUgJyIrbysiJyIpO3Rocm93IGYuY29kZT0iTU9EVUxFX05PVF9GT1VORCIsZn12YXIgbD1uW29dPXtleHBvcnRzOnt9fTt0W29dWzBdLmNhbGwobC5leHBvcnRzLGZ1bmN0aW9uKGUpe3ZhciBuPXRbb11bMV1bZV07cmV0dXJuIHMobj9uOmUpfSxsLGwuZXhwb3J0cyxlLHQsbixyKX1yZXR1cm4gbltvXS5leHBvcnRzfXZhciBpPXR5cGVvZiByZXF1aXJlPT0iZnVuY3Rpb24iJiZyZXF1aXJlO2Zvcih2YXIgbz0wO288ci5sZW5ndGg7bysrKXMocltvXSk7cmV0dXJuIHN9KSh7MTpbZnVuY3Rpb24ocmVxdWlyZSxtb2R1bGUsZXhwb3J0cyl7Cm1vZHVsZS5leHBvcnRzPXJlcXVpcmUoIi4vZm9ybWF0dGVycyIpOwp9LHsiLi9mb3JtYXR0ZXJzIjo2fV0sMjpbZnVuY3Rpb24ocmVxdWlyZSxtb2R1bGUsZXhwb3J0cyl7CmV4cG9ydHMuaXNCcm93c2VyPSJ1bmRlZmluZWQiIT10eXBlb2Ygd2luZG93Owp9LHt9XSwzOltmdW5jdGlvbihyZXF1aXJlLG1vZHVsZSxleHBvcnRzKXsKdmFyIGJhc2U9cmVxdWlyZSgiLi9iYXNlIiksQmFzZUZvcm1hdHRlcj1iYXNlLkJhc2VGb3JtYXR0ZXIsQW5ub3RhdGVkRm9ybWF0dGVyPWZ1bmN0aW9uKCl7dGhpcy5pbmNsdWRlTW92ZURlc3RpbmF0aW9ucz0hMX07QW5ub3RhdGVkRm9ybWF0dGVyLnByb3RvdHlwZT1uZXcgQmFzZUZvcm1hdHRlcixBbm5vdGF0ZWRGb3JtYXR0ZXIucHJvdG90eXBlLnByZXBhcmVDb250ZXh0PWZ1bmN0aW9uKHQpe0Jhc2VGb3JtYXR0ZXIucHJvdG90eXBlLnByZXBhcmVDb250ZXh0LmNhbGwodGhpcyx0KSx0LmluZGVudD1mdW5jdGlvbih0KXt0aGlzLmluZGVudExldmVsPSh0aGlzLmluZGVudExldmVsfHwwKSsoInVuZGVmaW5lZCI9PXR5cGVvZiB0PzE6dCksdGhpcy5pbmRlbnRQYWQ9bmV3IEFycmF5KHRoaXMuaW5kZW50TGV2ZWwrMSkuam9pbigiJm5ic3A7Jm5ic3A7Iil9LHQucm93PWZ1bmN0aW9uKGUsbil7dC5vdXQoJzx0cj48dGQgc3R5bGU9IndoaXRlLXNwYWNlOiBub3dyYXA7Ij48cHJlIGNsYXNzPSJqc29uZGlmZnBhdGNoLWFubm90YXRlZC1pbmRlbnQiIHN0eWxlPSJkaXNwbGF5OiBpbmxpbmUtYmxvY2siPicpLHQub3V0KHQuaW5kZW50UGFkKSx0Lm91dCgnPC9wcmU+PHByZSBzdHlsZT0iZGlzcGxheTogaW5saW5lLWJsb2NrIj4nKSx0Lm91dChlKSx0Lm91dCgnPC9wcmU+PC90ZD48dGQgY2xhc3M9Impzb25kaWZmcGF0Y2gtZGVsdGEtbm90ZSI+PGRpdj4nKSx0Lm91dChuKSx0Lm91dCgiPC9kaXY+PC90ZD48L3RyPiIpfX0sQW5ub3RhdGVkRm9ybWF0dGVyLnByb3RvdHlwZS50eXBlRm9ybWF0dHRlckVycm9yRm9ybWF0dGVyPWZ1bmN0aW9uKHQsZSl7dC5yb3coIiIsJzxwcmUgY2xhc3M9Impzb25kaWZmcGF0Y2gtZXJyb3IiPicrZSsiPC9wcmU+Iil9LEFubm90YXRlZEZvcm1hdHRlci5wcm90b3R5cGUuZm9ybWF0VGV4dERpZmZTdHJpbmc9ZnVuY3Rpb24odCxlKXt2YXIgbj10aGlzLnBhcnNlVGV4dERpZmYoZSk7dC5vdXQoJzx1bCBjbGFzcz0ianNvbmRpZmZwYXRjaC10ZXh0ZGlmZiI+Jyk7Zm9yKHZhciBvPTAscj1uLmxlbmd0aDtyPm87bysrKXt2YXIgYT1uW29dO3Qub3V0KCc8bGk+PGRpdiBjbGFzcz0ianNvbmRpZmZwYXRjaC10ZXh0ZGlmZi1sb2NhdGlvbiI+PHNwYW4gY2xhc3M9Impzb25kaWZmcGF0Y2gtdGV4dGRpZmYtbGluZS1udW1iZXIiPicrYS5sb2NhdGlvbi5saW5lKyc8L3NwYW4+PHNwYW4gY2xhc3M9Impzb25kaWZmcGF0Y2gtdGV4dGRpZmYtY2hhciI+JythLmxvY2F0aW9uLmNocisnPC9zcGFuPjwvZGl2PjxkaXYgY2xhc3M9Impzb25kaWZmcGF0Y2gtdGV4dGRpZmYtbGluZSI+Jyk7Zm9yKHZhciBpPWEucGllY2VzLGQ9MCxwPWkubGVuZ3RoO3A+ZDtkKyspe3ZhciBmPWlbZF07dC5vdXQoJzxzcGFuIGNsYXNzPSJqc29uZGlmZnBhdGNoLXRleHRkaWZmLScrZi50eXBlKyciPicrZi50ZXh0KyI8L3NwYW4+Iil9dC5vdXQoIjwvZGl2PjwvbGk+Iil9dC5vdXQoIjwvdWw+Iil9LEFubm90YXRlZEZvcm1hdHRlci5wcm90b3R5cGUucm9vdEJlZ2luPWZ1bmN0aW9uKHQsZSxuKXt0Lm91dCgnPHRhYmxlIGNsYXNzPSJqc29uZGlmZnBhdGNoLWFubm90YXRlZC1kZWx0YSI+JyksIm5vZGUiPT09ZSYmKHQucm93KCJ7IiksdC5pbmRlbnQoKSksImFycmF5Ij09PW4mJnQucm93KCciX3QiOiAiYSIsJywiQXJyYXkgZGVsdGEgKG1lbWJlciBuYW1lcyBpbmRpY2F0ZSBhcnJheSBpbmRpY2VzKSIpfSxBbm5vdGF0ZWRGb3JtYXR0ZXIucHJvdG90eXBlLnJvb3RFbmQ9ZnVuY3Rpb24odCxlKXsibm9kZSI9PT1lJiYodC5pbmRlbnQoLTEpLHQucm93KCJ9IikpLHQub3V0KCI8L3RhYmxlPiIpfSxBbm5vdGF0ZWRGb3JtYXR0ZXIucHJvdG90eXBlLm5vZGVCZWdpbj1mdW5jdGlvbih0LGUsbixvLHIpe3Qucm93KCImcXVvdDsiK2UrIiZxdW90OzogeyIpLCJub2RlIj09PW8mJnQuaW5kZW50KCksImFycmF5Ij09PXImJnQucm93KCciX3QiOiAiYSIsJywiQXJyYXkgZGVsdGEgKG1lbWJlciBuYW1lcyBpbmRpY2F0ZSBhcnJheSBpbmRpY2VzKSIpfSxBbm5vdGF0ZWRGb3JtYXR0ZXIucHJvdG90eXBlLm5vZGVFbmQ9ZnVuY3Rpb24odCxlLG4sbyxyLGEpeyJub2RlIj09PW8mJnQuaW5kZW50KC0xKSx0LnJvdygifSIrKGE/IiI6IiwiKSl9LEFubm90YXRlZEZvcm1hdHRlci5wcm90b3R5cGUuZm9ybWF0X3VuY2hhbmdlZD1mdW5jdGlvbigpe30sQW5ub3RhdGVkRm9ybWF0dGVyLnByb3RvdHlwZS5mb3JtYXRfbW92ZWRlc3RpbmF0aW9uPWZ1bmN0aW9uKCl7fSxBbm5vdGF0ZWRGb3JtYXR0ZXIucHJvdG90eXBlLmZvcm1hdF9ub2RlPWZ1bmN0aW9uKHQsZSxuKXt0aGlzLmZvcm1hdERlbHRhQ2hpbGRyZW4odCxlLG4pfTt2YXIgd3JhcFByb3BlcnR5TmFtZT1mdW5jdGlvbih0KXtyZXR1cm4nPHByZSBzdHlsZT0iZGlzcGxheTppbmxpbmUtYmxvY2siPiZxdW90OycrdCsiJnF1b3Q7PC9wcmU+In0sZGVsdGFBbm5vdGF0aW9ucz17YWRkZWQ6ZnVuY3Rpb24odCxlLG4sbyl7dmFyIHI9IiA8cHJlPihbbmV3VmFsdWVdKTwvcHJlPiI7cmV0dXJuInVuZGVmaW5lZCI9PXR5cGVvZiBvPyJuZXcgdmFsdWUiK3I6Im51bWJlciI9PXR5cGVvZiBvPyJpbnNlcnQgYXQgaW5kZXggIitvK3I6ImFkZCBwcm9wZXJ0eSAiK3dyYXBQcm9wZXJ0eU5hbWUobykrcn0sbW9kaWZpZWQ6ZnVuY3Rpb24odCxlLG4sbyl7dmFyIHI9IiA8cHJlPihbcHJldmlvdXNWYWx1ZSwgbmV3VmFsdWVdKTwvcHJlPiI7cmV0dXJuInVuZGVmaW5lZCI9PXR5cGVvZiBvPyJtb2RpZnkgdmFsdWUiK3I6Im51bWJlciI9PXR5cGVvZiBvPyJtb2RpZnkgYXQgaW5kZXggIitvK3I6Im1vZGlmeSBwcm9wZXJ0eSAiK3dyYXBQcm9wZXJ0eU5hbWUobykrcn0sZGVsZXRlZDpmdW5jdGlvbih0LGUsbixvKXt2YXIgcj0iIDxwcmU+KFtwcmV2aW91c1ZhbHVlLCAwLCAwXSk8L3ByZT4iO3JldHVybiJ1bmRlZmluZWQiPT10eXBlb2Ygbz8iZGVsZXRlIHZhbHVlIityOiJudW1iZXIiPT10eXBlb2Ygbz8icmVtb3ZlIGluZGV4ICIrbytyOiJkZWxldGUgcHJvcGVydHkgIit3cmFwUHJvcGVydHlOYW1lKG8pK3J9LG1vdmVkOmZ1bmN0aW9uKHQsZSxuLG8pe3JldHVybidtb3ZlIGZyb20gPHNwYW4gdGl0bGU9Iihwb3NpdGlvbiB0byByZW1vdmUgYXQgb3JpZ2luYWwgc3RhdGUpIj5pbmRleCAnK28rJzwvc3Bhbj4gdG8gPHNwYW4gdGl0bGU9Iihwb3NpdGlvbiB0byBpbnNlcnQgYXQgZmluYWwgc3RhdGUpIj5pbmRleCAnK3RbMV0rIjwvc3Bhbj4ifSx0ZXh0ZGlmZjpmdW5jdGlvbih0LGUsbixvKXt2YXIgcj0idW5kZWZpbmVkIj09dHlwZW9mIG8/IiI6Im51bWJlciI9PXR5cGVvZiBvPyIgYXQgaW5kZXggIitvOiIgYXQgcHJvcGVydHkgIit3cmFwUHJvcGVydHlOYW1lKG8pO3JldHVybiJ0ZXh0IGRpZmYiK3IrJywgZm9ybWF0IGlzIDxhIGhyZWY9Imh0dHBzOi8vY29kZS5nb29nbGUuY29tL3AvZ29vZ2xlLWRpZmYtbWF0Y2gtcGF0Y2gvd2lraS9VbmlkaWZmIj5hIHZhcmlhdGlvbiBvZiBVbmlkaWZmPC9hPid9fSxmb3JtYXRBbnlDaGFuZ2U9ZnVuY3Rpb24odCxlKXt2YXIgbj10aGlzLmdldERlbHRhVHlwZShlKSxvPWRlbHRhQW5ub3RhdGlvbnNbbl0scj1vJiZvLmFwcGx5KG8sQXJyYXkucHJvdG90eXBlLnNsaWNlLmNhbGwoYXJndW1lbnRzLDEpKSxhPUpTT04uc3RyaW5naWZ5KGUsbnVsbCwyKTsidGV4dGRpZmYiPT09biYmKGE9YS5zcGxpdCgiXFxuIikuam9pbignXFxuIitcbiAgICInKSksdC5pbmRlbnQoKSx0LnJvdyhhLHIpLHQuaW5kZW50KC0xKX07QW5ub3RhdGVkRm9ybWF0dGVyLnByb3RvdHlwZS5mb3JtYXRfYWRkZWQ9Zm9ybWF0QW55Q2hhbmdlLEFubm90YXRlZEZvcm1hdHRlci5wcm90b3R5cGUuZm9ybWF0X21vZGlmaWVkPWZvcm1hdEFueUNoYW5nZSxBbm5vdGF0ZWRGb3JtYXR0ZXIucHJvdG90eXBlLmZvcm1hdF9kZWxldGVkPWZvcm1hdEFueUNoYW5nZSxBbm5vdGF0ZWRGb3JtYXR0ZXIucHJvdG90eXBlLmZvcm1hdF9tb3ZlZD1mb3JtYXRBbnlDaGFuZ2UsQW5ub3RhdGVkRm9ybWF0dGVyLnByb3RvdHlwZS5mb3JtYXRfdGV4dGRpZmY9Zm9ybWF0QW55Q2hhbmdlLGV4cG9ydHMuQW5ub3RhdGVkRm9ybWF0dGVyPUFubm90YXRlZEZvcm1hdHRlcjt2YXIgZGVmYXVsdEluc3RhbmNlO2V4cG9ydHMuZm9ybWF0PWZ1bmN0aW9uKHQsZSl7cmV0dXJuIGRlZmF1bHRJbnN0YW5jZXx8KGRlZmF1bHRJbnN0YW5jZT1uZXcgQW5ub3RhdGVkRm9ybWF0dGVyKSxkZWZhdWx0SW5zdGFuY2UuZm9ybWF0KHQsZSl9Owp9LHsiLi9iYXNlIjo0fV0sNDpbZnVuY3Rpb24ocmVxdWlyZSxtb2R1bGUsZXhwb3J0cyl7CnZhciBpc0FycmF5PSJmdW5jdGlvbiI9PXR5cGVvZiBBcnJheS5pc0FycmF5P0FycmF5LmlzQXJyYXk6ZnVuY3Rpb24oZSl7cmV0dXJuIGUgaW5zdGFuY2VvZiBBcnJheX0sZ2V0T2JqZWN0S2V5cz0iZnVuY3Rpb24iPT10eXBlb2YgT2JqZWN0LmtleXM/ZnVuY3Rpb24oZSl7cmV0dXJuIE9iamVjdC5rZXlzKGUpfTpmdW5jdGlvbihlKXt2YXIgdD1bXTtmb3IodmFyIHIgaW4gZSlPYmplY3QucHJvdG90eXBlLmhhc093blByb3BlcnR5LmNhbGwoZSxyKSYmdC5wdXNoKHIpO3JldHVybiB0fSx0cmltVW5kZXJzY29yZT1mdW5jdGlvbihlKXtyZXR1cm4iXyI9PT1lLnN1YnN0cigwLDEpP2Uuc2xpY2UoMSk6ZX0sYXJyYXlLZXlUb1NvcnROdW1iZXI9ZnVuY3Rpb24oZSl7cmV0dXJuIl90Ij09PWU/LTE6Il8iPT09ZS5zdWJzdHIoMCwxKT9wYXJzZUludChlLnNsaWNlKDEpLDEwKTpwYXJzZUludChlLDEwKSsuMX0sYXJyYXlLZXlDb21wYXJlcj1mdW5jdGlvbihlLHQpe3JldHVybiBhcnJheUtleVRvU29ydE51bWJlcihlKS1hcnJheUtleVRvU29ydE51bWJlcih0KX0sQmFzZUZvcm1hdHRlcj1mdW5jdGlvbigpe307QmFzZUZvcm1hdHRlci5wcm90b3R5cGUuZm9ybWF0PWZ1bmN0aW9uKGUsdCl7dmFyIHI9e307cmV0dXJuIHRoaXMucHJlcGFyZUNvbnRleHQociksdGhpcy5yZWN1cnNlKHIsZSx0KSx0aGlzLmZpbmFsaXplKHIpfSxCYXNlRm9ybWF0dGVyLnByb3RvdHlwZS5wcmVwYXJlQ29udGV4dD1mdW5jdGlvbihlKXtlLmJ1ZmZlcj1bXSxlLm91dD1mdW5jdGlvbigpe3RoaXMuYnVmZmVyLnB1c2guYXBwbHkodGhpcy5idWZmZXIsYXJndW1lbnRzKX19LEJhc2VGb3JtYXR0ZXIucHJvdG90eXBlLnR5cGVGb3JtYXR0dGVyTm90Rm91bmQ9ZnVuY3Rpb24oZSx0KXt0aHJvdyBuZXcgRXJyb3IoImNhbm5vdCBmb3JtYXQgZGVsdGEgdHlwZTogIit0KX0sQmFzZUZvcm1hdHRlci5wcm90b3R5cGUudHlwZUZvcm1hdHR0ZXJFcnJvckZvcm1hdHRlcj1mdW5jdGlvbihlLHQpe3JldHVybiB0LnRvU3RyaW5nKCl9LEJhc2VGb3JtYXR0ZXIucHJvdG90eXBlLmZpbmFsaXplPWZ1bmN0aW9uKGUpe3JldHVybiBpc0FycmF5KGUuYnVmZmVyKT9lLmJ1ZmZlci5qb2luKCIiKTp2b2lkIDB9LEJhc2VGb3JtYXR0ZXIucHJvdG90eXBlLnJlY3Vyc2U9ZnVuY3Rpb24oZSx0LHIsbyxuLGEsaSl7dmFyIGY9dCYmYSxzPWY/YS52YWx1ZTpyO2lmKCJ1bmRlZmluZWQiIT10eXBlb2YgdHx8InVuZGVmaW5lZCIhPXR5cGVvZiBvKXt2YXIgdT10aGlzLmdldERlbHRhVHlwZSh0LGEpLHA9Im5vZGUiPT09dT8iYSI9PT10Ll90PyJhcnJheSI6Im9iamVjdCI6IiI7InVuZGVmaW5lZCIhPXR5cGVvZiBvP3RoaXMubm9kZUJlZ2luKGUsbyxuLHUscCxpKTp0aGlzLnJvb3RCZWdpbihlLHUscCk7dmFyIHk7dHJ5e3k9dGhpc1siZm9ybWF0XyIrdV18fHRoaXMudHlwZUZvcm1hdHR0ZXJOb3RGb3VuZChlLHUpLHkuY2FsbCh0aGlzLGUsdCxzLG8sbixhKX1jYXRjaChjKXt0aGlzLnR5cGVGb3JtYXR0dGVyRXJyb3JGb3JtYXR0ZXIoZSxjLHQscyxvLG4sYSksInVuZGVmaW5lZCIhPXR5cGVvZiBjb25zb2xlJiZjb25zb2xlLmVycm9yJiZjb25zb2xlLmVycm9yKGMuc3RhY2spfSJ1bmRlZmluZWQiIT10eXBlb2Ygbz90aGlzLm5vZGVFbmQoZSxvLG4sdSxwLGkpOnRoaXMucm9vdEVuZChlLHUscCl9fSxCYXNlRm9ybWF0dGVyLnByb3RvdHlwZS5mb3JtYXREZWx0YUNoaWxkcmVuPWZ1bmN0aW9uKGUsdCxyKXt2YXIgbz10aGlzO3RoaXMuZm9yRWFjaERlbHRhS2V5KHQscixmdW5jdGlvbihuLGEsaSxmKXtvLnJlY3Vyc2UoZSx0W25dLHI/clthXTp2b2lkIDAsbixhLGksZil9KX0sQmFzZUZvcm1hdHRlci5wcm90b3R5cGUuZm9yRWFjaERlbHRhS2V5PWZ1bmN0aW9uKGUsdCxyKXt2YXIgbyxuPWdldE9iamVjdEtleXMoZSksYT0iYSI9PT1lLl90LGk9e307aWYoInVuZGVmaW5lZCIhPXR5cGVvZiB0KWZvcihvIGluIHQpT2JqZWN0LnByb3RvdHlwZS5oYXNPd25Qcm9wZXJ0eS5jYWxsKHQsbykmJigidW5kZWZpbmVkIiE9dHlwZW9mIGVbb118fGEmJiJ1bmRlZmluZWQiIT10eXBlb2YgZVsiXyIrb118fG4ucHVzaChvKSk7Zm9yKG8gaW4gZSlpZihPYmplY3QucHJvdG90eXBlLmhhc093blByb3BlcnR5LmNhbGwoZSxvKSl7dmFyIGY9ZVtvXTtpc0FycmF5KGYpJiYzPT09ZlsyXSYmKGlbZlsxXS50b1N0cmluZygpXT17a2V5Om8sdmFsdWU6dCYmdFtwYXJzZUludChvLnN1YnN0cigxKSldfSx0aGlzLmluY2x1ZGVNb3ZlRGVzdGluYXRpb25zIT09ITEmJiJ1bmRlZmluZWQiPT10eXBlb2YgdCYmInVuZGVmaW5lZCI9PXR5cGVvZiBlW2ZbMV1dJiZuLnB1c2goZlsxXS50b1N0cmluZygpKSl9YT9uLnNvcnQoYXJyYXlLZXlDb21wYXJlcik6bi5zb3J0KCk7Zm9yKHZhciBzPTAsdT1uLmxlbmd0aDt1PnM7cysrKXt2YXIgcD1uW3NdO2lmKCFhfHwiX3QiIT09cCl7dmFyIHk9YT8ibnVtYmVyIj09dHlwZW9mIHA/cDpwYXJzZUludCh0cmltVW5kZXJzY29yZShwKSwxMCk6cCxjPXM9PT11LTE7cihwLHksaVt5XSxjKX19fSxCYXNlRm9ybWF0dGVyLnByb3RvdHlwZS5nZXREZWx0YVR5cGU9ZnVuY3Rpb24oZSx0KXtpZigidW5kZWZpbmVkIj09dHlwZW9mIGUpcmV0dXJuInVuZGVmaW5lZCIhPXR5cGVvZiB0PyJtb3ZlZGVzdGluYXRpb24iOiJ1bmNoYW5nZWQiO2lmKGlzQXJyYXkoZSkpe2lmKDE9PT1lLmxlbmd0aClyZXR1cm4iYWRkZWQiO2lmKDI9PT1lLmxlbmd0aClyZXR1cm4ibW9kaWZpZWQiO2lmKDM9PT1lLmxlbmd0aCYmMD09PWVbMl0pcmV0dXJuImRlbGV0ZWQiO2lmKDM9PT1lLmxlbmd0aCYmMj09PWVbMl0pcmV0dXJuInRleHRkaWZmIjtpZigzPT09ZS5sZW5ndGgmJjM9PT1lWzJdKXJldHVybiJtb3ZlZCJ9ZWxzZSBpZigib2JqZWN0Ij09dHlwZW9mIGUpcmV0dXJuIm5vZGUiO3JldHVybiJ1bmtub3duIn0sQmFzZUZvcm1hdHRlci5wcm90b3R5cGUucGFyc2VUZXh0RGlmZj1mdW5jdGlvbihlKXtmb3IodmFyIHQ9W10scj1lLnNwbGl0KCJcbkBAICIpLG89MCxuPXIubGVuZ3RoO24+bztvKyspe3ZhciBhPXJbb10saT17cGllY2VzOltdfSxmPS9eKD86QEAgKT9bLStdPyhcZCspLChcZCspLy5leGVjKGEpLnNsaWNlKDEpO2kubG9jYXRpb249e2xpbmU6ZlswXSxjaHI6ZlsxXX07Zm9yKHZhciBzPWEuc3BsaXQoIlxuIikuc2xpY2UoMSksdT0wLHA9cy5sZW5ndGg7cD51O3UrKyl7dmFyIHk9c1t1XTtpZih5Lmxlbmd0aCl7dmFyIGM9e3R5cGU6ImNvbnRleHQifTsiKyI9PT15LnN1YnN0cigwLDEpP2MudHlwZT0iYWRkZWQiOiItIj09PXkuc3Vic3RyKDAsMSkmJihjLnR5cGU9ImRlbGV0ZWQiKSxjLnRleHQ9eS5zbGljZSgxKSxpLnBpZWNlcy5wdXNoKGMpfX10LnB1c2goaSl9cmV0dXJuIHR9LGV4cG9ydHMuQmFzZUZvcm1hdHRlcj1CYXNlRm9ybWF0dGVyOwp9LHt9XSw1OltmdW5jdGlvbihyZXF1aXJlLG1vZHVsZSxleHBvcnRzKXsKZnVuY3Rpb24gaHRtbEVzY2FwZSh0KXtmb3IodmFyIGU9dCxvPVtbLyYvZywiJmFtcDsiXSxbLzwvZywiJmx0OyJdLFsvPi9nLCImZ3Q7Il0sWy8nL2csIiZhcG9zOyJdLFsvIi9nLCImcXVvdDsiXV0sYT0wO2E8by5sZW5ndGg7YSsrKWU9ZS5yZXBsYWNlKG9bYV1bMF0sb1thXVsxXSk7cmV0dXJuIGV9dmFyIGJhc2U9cmVxdWlyZSgiLi9iYXNlIiksQmFzZUZvcm1hdHRlcj1iYXNlLkJhc2VGb3JtYXR0ZXIsSHRtbEZvcm1hdHRlcj1mdW5jdGlvbigpe307SHRtbEZvcm1hdHRlci5wcm90b3R5cGU9bmV3IEJhc2VGb3JtYXR0ZXIsSHRtbEZvcm1hdHRlci5wcm90b3R5cGUudHlwZUZvcm1hdHR0ZXJFcnJvckZvcm1hdHRlcj1mdW5jdGlvbih0LGUpe3Qub3V0KCc8cHJlIGNsYXNzPSJqc29uZGlmZnBhdGNoLWVycm9yIj4nK2UrIjwvcHJlPiIpfSxIdG1sRm9ybWF0dGVyLnByb3RvdHlwZS5mb3JtYXRWYWx1ZT1mdW5jdGlvbih0LGUpe3Qub3V0KCI8cHJlPiIraHRtbEVzY2FwZShKU09OLnN0cmluZ2lmeShlLG51bGwsMikpKyI8L3ByZT4iKX0sSHRtbEZvcm1hdHRlci5wcm90b3R5cGUuZm9ybWF0VGV4dERpZmZTdHJpbmc9ZnVuY3Rpb24odCxlKXt2YXIgbz10aGlzLnBhcnNlVGV4dERpZmYoZSk7dC5vdXQoJzx1bCBjbGFzcz0ianNvbmRpZmZwYXRjaC10ZXh0ZGlmZiI+Jyk7Zm9yKHZhciBhPTAscj1vLmxlbmd0aDtyPmE7YSsrKXt2YXIgaT1vW2FdO3Qub3V0KCc8bGk+PGRpdiBjbGFzcz0ianNvbmRpZmZwYXRjaC10ZXh0ZGlmZi1sb2NhdGlvbiI+PHNwYW4gY2xhc3M9Impzb25kaWZmcGF0Y2gtdGV4dGRpZmYtbGluZS1udW1iZXIiPicraS5sb2NhdGlvbi5saW5lKyc8L3NwYW4+PHNwYW4gY2xhc3M9Impzb25kaWZmcGF0Y2gtdGV4dGRpZmYtY2hhciI+JytpLmxvY2F0aW9uLmNocisnPC9zcGFuPjwvZGl2PjxkaXYgY2xhc3M9Impzb25kaWZmcGF0Y2gtdGV4dGRpZmYtbGluZSI+Jyk7Zm9yKHZhciBuPWkucGllY2VzLHM9MCxkPW4ubGVuZ3RoO2Q+cztzKyspe3ZhciBmPW5bc107dC5vdXQoJzxzcGFuIGNsYXNzPSJqc29uZGlmZnBhdGNoLXRleHRkaWZmLScrZi50eXBlKyciPicraHRtbEVzY2FwZSh1bmVzY2FwZShmLnRleHQpKSsiPC9zcGFuPiIpfXQub3V0KCI8L2Rpdj48L2xpPiIpfXQub3V0KCI8L3VsPiIpfTt2YXIgYWRqdXN0QXJyb3dzPWZ1bmN0aW9uKHQpe3Q9dHx8ZG9jdW1lbnQ7dmFyIGU9ZnVuY3Rpb24odCl7cmV0dXJuIHQudGV4dENvbnRlbnR8fHQuaW5uZXJUZXh0fSxvPWZ1bmN0aW9uKHQsZSxvKXtmb3IodmFyIGE9dC5xdWVyeVNlbGVjdG9yQWxsKGUpLHI9MCxpPWEubGVuZ3RoO2k+cjtyKyspbyhhW3JdKX0sYT1mdW5jdGlvbih0LGUpe2Zvcih2YXIgbz0wLGE9dC5jaGlsZHJlbi5sZW5ndGg7YT5vO28rKyllKHQuY2hpbGRyZW5bb10sbyl9O28odCwiLmpzb25kaWZmcGF0Y2gtYXJyb3ciLGZ1bmN0aW9uKHQpe3ZhciBvPXQucGFyZW50Tm9kZSxyPXQuY2hpbGRyZW5bMF0saT1yLmNoaWxkcmVuWzFdO3Iuc3R5bGUuZGlzcGxheT0ibm9uZSI7dmFyIG4scz1lKG8ucXVlcnlTZWxlY3RvcigiLmpzb25kaWZmcGF0Y2gtbW92ZWQtZGVzdGluYXRpb24iKSksZD1vLnBhcmVudE5vZGU7aWYoYShkLGZ1bmN0aW9uKHQpe3QuZ2V0QXR0cmlidXRlKCJkYXRhLWtleSIpPT09cyYmKG49dCl9KSxuKXRyeXt2YXIgZj1uLm9mZnNldFRvcC1vLm9mZnNldFRvcDtyLnNldEF0dHJpYnV0ZSgiaGVpZ2h0IixNYXRoLmFicyhmKSs2KSx0LnN0eWxlLnRvcD0tOCsoZj4wPzA6ZikrInB4Ijt2YXIgbD1mPjA/Ik0zMCwwIFEtMTAsIitNYXRoLnJvdW5kKGYvMikrIiAyNiwiKyhmLTQpOiJNMzAsIistZisiIFEtMTAsIitNYXRoLnJvdW5kKC1mLzIpKyIgMjYsNCI7aS5zZXRBdHRyaWJ1dGUoImQiLGwpLHIuc3R5bGUuZGlzcGxheT0iIn1jYXRjaChjKXtyZXR1cm59fSl9O0h0bWxGb3JtYXR0ZXIucHJvdG90eXBlLnJvb3RCZWdpbj1mdW5jdGlvbih0LGUsbyl7dmFyIGE9Impzb25kaWZmcGF0Y2gtIitlKyhvPyIganNvbmRpZmZwYXRjaC1jaGlsZC1ub2RlLXR5cGUtIitvOiIiKTt0Lm91dCgnPGRpdiBjbGFzcz0ianNvbmRpZmZwYXRjaC1kZWx0YSAnK2ErJyI+Jyl9LEh0bWxGb3JtYXR0ZXIucHJvdG90eXBlLnJvb3RFbmQ9ZnVuY3Rpb24odCl7dC5vdXQoIjwvZGl2PiIrKHQuaGFzQXJyb3dzPyc8c2NyaXB0IHR5cGU9InRleHQvamF2YXNjcmlwdCI+c2V0VGltZW91dCgnK2FkanVzdEFycm93cy50b1N0cmluZygpKyIsMTApOzwvc2NyaXB0PiI6IiIpKX0sSHRtbEZvcm1hdHRlci5wcm90b3R5cGUubm9kZUJlZ2luPWZ1bmN0aW9uKHQsZSxvLGEscil7dmFyIGk9Impzb25kaWZmcGF0Y2gtIithKyhyPyIganNvbmRpZmZwYXRjaC1jaGlsZC1ub2RlLXR5cGUtIityOiIiKTt0Lm91dCgnPGxpIGNsYXNzPSInK2krJyIgZGF0YS1rZXk9IicrbysnIj48ZGl2IGNsYXNzPSJqc29uZGlmZnBhdGNoLXByb3BlcnR5LW5hbWUiPicrbysiPC9kaXY+Iil9LEh0bWxGb3JtYXR0ZXIucHJvdG90eXBlLm5vZGVFbmQ9ZnVuY3Rpb24odCl7dC5vdXQoIjwvbGk+Iil9LEh0bWxGb3JtYXR0ZXIucHJvdG90eXBlLmZvcm1hdF91bmNoYW5nZWQ9ZnVuY3Rpb24odCxlLG8peyJ1bmRlZmluZWQiIT10eXBlb2YgbyYmKHQub3V0KCc8ZGl2IGNsYXNzPSJqc29uZGlmZnBhdGNoLXZhbHVlIj4nKSx0aGlzLmZvcm1hdFZhbHVlKHQsbyksdC5vdXQoIjwvZGl2PiIpKX0sSHRtbEZvcm1hdHRlci5wcm90b3R5cGUuZm9ybWF0X21vdmVkZXN0aW5hdGlvbj1mdW5jdGlvbih0LGUsbyl7InVuZGVmaW5lZCIhPXR5cGVvZiBvJiYodC5vdXQoJzxkaXYgY2xhc3M9Impzb25kaWZmcGF0Y2gtdmFsdWUiPicpLHRoaXMuZm9ybWF0VmFsdWUodCxvKSx0Lm91dCgiPC9kaXY+IikpfSxIdG1sRm9ybWF0dGVyLnByb3RvdHlwZS5mb3JtYXRfbm9kZT1mdW5jdGlvbih0LGUsbyl7dmFyIGE9ImEiPT09ZS5fdD8iYXJyYXkiOiJvYmplY3QiO3Qub3V0KCc8dWwgY2xhc3M9Impzb25kaWZmcGF0Y2gtbm9kZSBqc29uZGlmZnBhdGNoLW5vZGUtdHlwZS0nK2ErJyI+JyksdGhpcy5mb3JtYXREZWx0YUNoaWxkcmVuKHQsZSxvKSx0Lm91dCgiPC91bD4iKX0sSHRtbEZvcm1hdHRlci5wcm90b3R5cGUuZm9ybWF0X2FkZGVkPWZ1bmN0aW9uKHQsZSl7dC5vdXQoJzxkaXYgY2xhc3M9Impzb25kaWZmcGF0Y2gtdmFsdWUiPicpLHRoaXMuZm9ybWF0VmFsdWUodCxlWzBdKSx0Lm91dCgiPC9kaXY+Iil9LEh0bWxGb3JtYXR0ZXIucHJvdG90eXBlLmZvcm1hdF9tb2RpZmllZD1mdW5jdGlvbih0LGUpe3Qub3V0KCc8ZGl2IGNsYXNzPSJqc29uZGlmZnBhdGNoLXZhbHVlIGpzb25kaWZmcGF0Y2gtbGVmdC12YWx1ZSI+JyksdGhpcy5mb3JtYXRWYWx1ZSh0LGVbMF0pLHQub3V0KCc8L2Rpdj48ZGl2IGNsYXNzPSJqc29uZGlmZnBhdGNoLXZhbHVlIGpzb25kaWZmcGF0Y2gtcmlnaHQtdmFsdWUiPicpLHRoaXMuZm9ybWF0VmFsdWUodCxlWzFdKSx0Lm91dCgiPC9kaXY+Iil9LEh0bWxGb3JtYXR0ZXIucHJvdG90eXBlLmZvcm1hdF9kZWxldGVkPWZ1bmN0aW9uKHQsZSl7dC5vdXQoJzxkaXYgY2xhc3M9Impzb25kaWZmcGF0Y2gtdmFsdWUiPicpLHRoaXMuZm9ybWF0VmFsdWUodCxlWzBdKSx0Lm91dCgiPC9kaXY+Iil9LEh0bWxGb3JtYXR0ZXIucHJvdG90eXBlLmZvcm1hdF9tb3ZlZD1mdW5jdGlvbih0LGUpe3Qub3V0KCc8ZGl2IGNsYXNzPSJqc29uZGlmZnBhdGNoLXZhbHVlIj4nKSx0aGlzLmZvcm1hdFZhbHVlKHQsZVswXSksdC5vdXQoJzwvZGl2PjxkaXYgY2xhc3M9Impzb25kaWZmcGF0Y2gtbW92ZWQtZGVzdGluYXRpb24iPicrZVsxXSsiPC9kaXY+IiksdC5vdXQoJzxkaXYgY2xhc3M9Impzb25kaWZmcGF0Y2gtYXJyb3ciIHN0eWxlPSJwb3NpdGlvbjogcmVsYXRpdmU7IGxlZnQ6IC0zNHB4OyI+ICAgICAgICA8c3ZnIHdpZHRoPSIzMCIgaGVpZ2h0PSI2MCIgc3R5bGU9InBvc2l0aW9uOiBhYnNvbHV0ZTsgZGlzcGxheTogbm9uZTsiPiAgICAgICAgPGRlZnM+ICAgICAgICAgICAgPG1hcmtlciBpZD0ibWFya2VyQXJyb3ciIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZng9IjIiIHJlZnk9IjQiICAgICAgICAgICAgICAgICAgIG9yaWVudD0iYXV0byIgbWFya2VyVW5pdHM9InVzZXJTcGFjZU9uVXNlIj4gICAgICAgICAgICAgICAgPHBhdGggZD0iTTEsMSBMMSw3IEw3LDQgTDEsMSIgc3R5bGU9ImZpbGw6ICMzMzk7IiAvPiAgICAgICAgICAgIDwvbWFya2VyPiAgICAgICAgPC9kZWZzPiAgICAgICAgPHBhdGggZD0iTTMwLDAgUS0xMCwyNSAyNiw1MCIgc3R5bGU9InN0cm9rZTogIzg4Zjsgc3Ryb2tlLXdpZHRoOiAycHg7IGZpbGw6IG5vbmU7ICAgICAgICBzdHJva2Utb3BhY2l0eTogMC41OyBtYXJrZXItZW5kOiB1cmwoI21hcmtlckFycm93KTsiPjwvcGF0aD4gICAgICAgIDwvc3ZnPiAgICAgICAgPC9kaXY+JyksdC5oYXNBcnJvd3M9ITB9LEh0bWxGb3JtYXR0ZXIucHJvdG90eXBlLmZvcm1hdF90ZXh0ZGlmZj1mdW5jdGlvbih0LGUpe3Qub3V0KCc8ZGl2IGNsYXNzPSJqc29uZGlmZnBhdGNoLXZhbHVlIj4nKSx0aGlzLmZvcm1hdFRleHREaWZmU3RyaW5nKHQsZVswXSksdC5vdXQoIjwvZGl2PiIpfTt2YXIgc2hvd1VuY2hhbmdlZD1mdW5jdGlvbih0LGUsbyl7dmFyIGE9ZXx8ZG9jdW1lbnQuYm9keSxyPSJqc29uZGlmZnBhdGNoLXVuY2hhbmdlZC0iLGk9e3Nob3dpbmc6cisic2hvd2luZyIsaGlkaW5nOnIrImhpZGluZyIsdmlzaWJsZTpyKyJ2aXNpYmxlIixoaWRkZW46cisiaGlkZGVuIn0sbj1hLmNsYXNzTGlzdDtpZihuKXtpZighbylyZXR1cm4gbi5yZW1vdmUoaS5zaG93aW5nKSxuLnJlbW92ZShpLmhpZGluZyksbi5yZW1vdmUoaS52aXNpYmxlKSxuLnJlbW92ZShpLmhpZGRlbiksdm9pZCh0PT09ITEmJm4uYWRkKGkuaGlkZGVuKSk7dD09PSExPyhuLnJlbW92ZShpLnNob3dpbmcpLG4uYWRkKGkudmlzaWJsZSksc2V0VGltZW91dChmdW5jdGlvbigpe24uYWRkKGkuaGlkaW5nKX0sMTApKToobi5yZW1vdmUoaS5oaWRpbmcpLG4uYWRkKGkuc2hvd2luZyksbi5yZW1vdmUoaS5oaWRkZW4pKTt2YXIgcz1zZXRJbnRlcnZhbChmdW5jdGlvbigpe2FkanVzdEFycm93cyhhKX0sMTAwKTtzZXRUaW1lb3V0KGZ1bmN0aW9uKCl7bi5yZW1vdmUoaS5zaG93aW5nKSxuLnJlbW92ZShpLmhpZGluZyksdD09PSExPyhuLmFkZChpLmhpZGRlbiksbi5yZW1vdmUoaS52aXNpYmxlKSk6KG4uYWRkKGkudmlzaWJsZSksbi5yZW1vdmUoaS5oaWRkZW4pKSxzZXRUaW1lb3V0KGZ1bmN0aW9uKCl7bi5yZW1vdmUoaS52aXNpYmxlKSxjbGVhckludGVydmFsKHMpfSxvKzQwMCl9LG8pfX0saGlkZVVuY2hhbmdlZD1mdW5jdGlvbih0LGUpe3JldHVybiBzaG93VW5jaGFuZ2VkKCExLHQsZSl9O2V4cG9ydHMuSHRtbEZvcm1hdHRlcj1IdG1sRm9ybWF0dGVyLGV4cG9ydHMuc2hvd1VuY2hhbmdlZD1zaG93VW5jaGFuZ2VkLGV4cG9ydHMuaGlkZVVuY2hhbmdlZD1oaWRlVW5jaGFuZ2VkO3ZhciBkZWZhdWx0SW5zdGFuY2U7ZXhwb3J0cy5mb3JtYXQ9ZnVuY3Rpb24odCxlKXtyZXR1cm4gZGVmYXVsdEluc3RhbmNlfHwoZGVmYXVsdEluc3RhbmNlPW5ldyBIdG1sRm9ybWF0dGVyKSxkZWZhdWx0SW5zdGFuY2UuZm9ybWF0KHQsZSl9Owp9LHsiLi9iYXNlIjo0fV0sNjpbZnVuY3Rpb24ocmVxdWlyZSxtb2R1bGUsZXhwb3J0cyl7CnZhciBlbnZpcm9ubWVudD1yZXF1aXJlKCIuLi9lbnZpcm9ubWVudCIpO2lmKGV4cG9ydHMuYmFzZT1yZXF1aXJlKCIuL2Jhc2UiKSxleHBvcnRzLmh0bWw9cmVxdWlyZSgiLi9odG1sIiksZXhwb3J0cy5hbm5vdGF0ZWQ9cmVxdWlyZSgiLi9hbm5vdGF0ZWQiKSxleHBvcnRzLmpzb25wYXRjaD1yZXF1aXJlKCIuL2pzb25wYXRjaCIpLCFlbnZpcm9ubWVudC5pc0Jyb3dzZXIpe3ZhciBjb25zb2xlTW9kdWxlTmFtZT0iLi9jb25zb2xlIjtleHBvcnRzLmNvbnNvbGU9cmVxdWlyZShjb25zb2xlTW9kdWxlTmFtZSl9Cn0seyIuLi9lbnZpcm9ubWVudCI6MiwiLi9hbm5vdGF0ZWQiOjMsIi4vYmFzZSI6NCwiLi9odG1sIjo1LCIuL2pzb25wYXRjaCI6N31dLDc6W2Z1bmN0aW9uKHJlcXVpcmUsbW9kdWxlLGV4cG9ydHMpewohZnVuY3Rpb24oKXtmdW5jdGlvbiB0KCl7dGhpcy5pbmNsdWRlTW92ZURlc3RpbmF0aW9ucz0hMX1mdW5jdGlvbiBlKHQpe3JldHVybiB0W3QubGVuZ3RoLTFdfWZ1bmN0aW9uIG4odCxlKXtyZXR1cm4gdC5zb3J0KGUpLHR9ZnVuY3Rpb24gbyh0KXtyZXR1cm4gbih0LGZ1bmN0aW9uKHQsbil7dmFyIG89dC5wYXRoLnNwbGl0KCIvIikscj1uLnBhdGguc3BsaXQoIi8iKTtyZXR1cm4gby5sZW5ndGghPT1yLmxlbmd0aD9vLmxlbmd0aC1yLmxlbmd0aDpkKGUobyksZShyKSl9KX1mdW5jdGlvbiByKHQsZSl7dmFyIG49W10sbz1bXTtyZXR1cm4gdC5mb3JFYWNoKGZ1bmN0aW9uKHQpe3ZhciByPWUodCk/bjpvO3IucHVzaCh0KX0pLFtuLG9dfWZ1bmN0aW9uIHAodCl7dmFyIGU9cih0LGZ1bmN0aW9uKHQpe3JldHVybiJyZW1vdmUiPT09dC5vcH0pLG49ZVswXSxwPWVbMV0sdT1vKG4pO3JldHVybiB1LmNvbmNhdChwKX12YXIgdT1yZXF1aXJlKCIuL2Jhc2UiKSxpPXUuQmFzZUZvcm1hdHRlcixhPXthZGRlZDoiYWRkIixkZWxldGVkOiJyZW1vdmUiLG1vZGlmaWVkOiJyZXBsYWNlIixtb3ZlZDoibW92ZWQiLG1vdmVkZXN0aW5hdGlvbjoibW92ZWRlc3RpbmF0aW9uIix1bmNoYW5nZWQ6InVuY2hhbmdlZCIsZXJyb3I6ImVycm9yIix0ZXh0RGlmZkxpbmU6InRleHREaWZmTGluZSJ9O3QucHJvdG90eXBlPW5ldyBpLHQucHJvdG90eXBlLnByZXBhcmVDb250ZXh0PWZ1bmN0aW9uKHQpe2kucHJvdG90eXBlLnByZXBhcmVDb250ZXh0LmNhbGwodGhpcyx0KSx0LnJlc3VsdD1bXSx0LnBhdGg9W10sdC5wdXNoQ3VycmVudE9wPWZ1bmN0aW9uKHQsZSl7dmFyIG49e29wOnQscGF0aDp0aGlzLmN1cnJlbnRQYXRoKCl9OyJ1bmRlZmluZWQiIT10eXBlb2YgZSYmKG4udmFsdWU9ZSksdGhpcy5yZXN1bHQucHVzaChuKX0sdC5jdXJyZW50UGF0aD1mdW5jdGlvbigpe3JldHVybiIvIit0aGlzLnBhdGguam9pbigiLyIpfX0sdC5wcm90b3R5cGUudHlwZUZvcm1hdHR0ZXJFcnJvckZvcm1hdHRlcj1mdW5jdGlvbih0LGUpe3Qub3V0KCJbRVJST1JdIitlKX0sdC5wcm90b3R5cGUucm9vdEJlZ2luPWZ1bmN0aW9uKCl7fSx0LnByb3RvdHlwZS5yb290RW5kPWZ1bmN0aW9uKCl7fSx0LnByb3RvdHlwZS5ub2RlQmVnaW49ZnVuY3Rpb24odCxlLG4pe3QucGF0aC5wdXNoKG4pfSx0LnByb3RvdHlwZS5ub2RlRW5kPWZ1bmN0aW9uKHQpe3QucGF0aC5wb3AoKX0sdC5wcm90b3R5cGUuZm9ybWF0X3VuY2hhbmdlZD1mdW5jdGlvbih0LGUsbil7InVuZGVmaW5lZCIhPXR5cGVvZiBuJiZ0LnB1c2hDdXJyZW50T3AoYS51bmNoYW5nZWQsbil9LHQucHJvdG90eXBlLmZvcm1hdF9tb3ZlZGVzdGluYXRpb249ZnVuY3Rpb24odCxlLG4peyJ1bmRlZmluZWQiIT10eXBlb2YgbiYmdC5wdXNoQ3VycmVudE9wKGEubW92ZWRlc3RpbmF0aW9uLG4pfSx0LnByb3RvdHlwZS5mb3JtYXRfbm9kZT1mdW5jdGlvbih0LGUsbil7dGhpcy5mb3JtYXREZWx0YUNoaWxkcmVuKHQsZSxuKX0sdC5wcm90b3R5cGUuZm9ybWF0X2FkZGVkPWZ1bmN0aW9uKHQsZSl7dC5wdXNoQ3VycmVudE9wKGEuYWRkZWQsZVswXSl9LHQucHJvdG90eXBlLmZvcm1hdF9tb2RpZmllZD1mdW5jdGlvbih0LGUpe3QucHVzaEN1cnJlbnRPcChhLm1vZGlmaWVkLGVbMV0pfSx0LnByb3RvdHlwZS5mb3JtYXRfZGVsZXRlZD1mdW5jdGlvbih0KXt0LnB1c2hDdXJyZW50T3AoYS5kZWxldGVkKX0sdC5wcm90b3R5cGUuZm9ybWF0X21vdmVkPWZ1bmN0aW9uKHQsZSl7dC5wdXNoQ3VycmVudE9wKGEubW92ZWQsZVsxXSl9LHQucHJvdG90eXBlLmZvcm1hdF90ZXh0ZGlmZj1mdW5jdGlvbigpe3Rocm93Im5vdCBpbXBsaW1lbnRlZCJ9LHQucHJvdG90eXBlLmZvcm1hdD1mdW5jdGlvbih0LGUpe3ZhciBuPXt9O3JldHVybiB0aGlzLnByZXBhcmVDb250ZXh0KG4pLHRoaXMucmVjdXJzZShuLHQsZSksbi5yZXN1bHR9LGV4cG9ydHMuSlNPTkZvcm1hdHRlcj10O3ZhciBmLGQ9ZnVuY3Rpb24odCxlKXt2YXIgbj1wYXJzZUludCh0LDEwKSxvPXBhcnNlSW50KGUsMTApO3JldHVybiBpc05hTihuKXx8aXNOYU4obyk/MDpvLW59LGM9ZnVuY3Rpb24oZSxuKXtyZXR1cm4gZnx8KGY9bmV3IHQpLHAoZi5mb3JtYXQoZSxuKSl9O2V4cG9ydHMubG9nPWZ1bmN0aW9uKHQsZSl7Y29uc29sZS5sb2coYyh0LGUpKX0sZXhwb3J0cy5mb3JtYXQ9Y30oKTsKfSx7Ii4vYmFzZSI6NH1dfSx7fSxbMV0pKDEpCn0pOwoKCi8vIyBzb3VyY2VNYXBwaW5nVVJMPWpzb25kaWZmcGF0Y2gtZm9ybWF0dGVycy5taW4ubWFw"></script>
+<script>HTMLWidgets.widget({
+
+  name: 'jsondiff',
+
+  type: 'output',
+
+  factory: function(el, width, height) {
+
+    // TODO: define shared variables for this instance
+
+    return {
+
+      renderValue: function(x) {
+
+        var defaultObjHash = function(obj, index) {
+          if (typeof obj._id !== 'undefined') {
+            return obj._id;
+          }
+          if (typeof obj.id !== 'undefined') {
+            return obj.id;
+          }
+          if (typeof obj.name !== 'undefined') {
+            return obj.name;
+          }
+          return '$$index:' + index;
+        };
+
+        xObj = JSON.parse(x);
+        var objectHash = xObj.objectHash;
+        if(objectHash == 'undefined') {
+          objectHash = defaultObjHash;
+        } else {
+          eval("objectHash = " + objectHash);
+        }
+
+        /* global jsondiffpatch */
+        var instance = jsondiffpatch.create({
+          objectHash: objectHash
+        });
+
+
+    		try {
+    		  var delta = instance.diff(xObj.x1, xObj.x2);
+
+    		  if (typeof delta === 'undefined') {
+    			  el.innerHTML = 'no diff';
+    		  } else {
+            switch (xObj.formatter) {
+              case 'html':
+                el.innerHTML = jsondiffpatch.formatters.html.format(delta, xObj.x1);
+          			if (xObj.hideUnchanged) {
+          			  jsondiffpatch.formatters.html.hideUnchanged();
+          			}
+                break;
+              case 'annotated':
+                el.innerHTML = jsondiffpatch.formatters.annotated.format(delta);
+                break;
+              case 'json':
+                el.innerHTML = "<pre>" + JSON.stringify(delta, null, 2) + "</pre>";
+                break;
+            }
+    		  }
+    		} catch (err) {
+    		  el.innerHTML = '';
+    		  if (typeof console !== 'undefined' && console.error) {
+    			console.error(err);
+    			console.error(err.stack);
+    		  }
+    		}
+
+
+      },
+
+      resize: function(width, height) {
+
+      }
+
+    };
+  }
+});
+
+
+
+
+</script>
+
+</head>
+<body>
+<div id="htmlwidget_container">
+  <div class="jsondiff html-widget html-fill-item-overflow-hidden html-fill-item" id="htmlwidget-42d3b68baa02e32e799b" style="width:960px;height:500px;"></div>
+</div>
+<script type="application/json" data-for="htmlwidget-42d3b68baa02e32e799b">{"x":"{\n        \"x1\": {\"3\":{\"type\":\"moveable_dnd\",\"isCorrect\":false,\"isStarted\":false,\"isFilled\":false,\"isResponded\":false,\"score\":0,\"weight\":2,\"scoring_type\":\"AUTO\",\"targets\":[{\"targetContext\":{\"id\":\"1\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks his team is too small to win. \",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":36},\"alignment\":\"center\",\"rotation\":0,\"entryId\":5,\"isShowAdvancedOptions\":true,\"fontSize\":1.5,\"isInvisible\":false},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435199950/voice-1j2TYno48FaNfDaaKGrnS5.mp3\",\"script\":\"He thinks his team is too small to win. \",\"fileType\":\"audio/mp3\"},\"x\":0.01,\"y\":0.01,\"width\":11.31,\"height\":9,\"targetId\":\"Answer\"},\"contents\":[{\"ref\":{\"id\":1,\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks his team is too small to win. \",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":36},\"alignment\":\"center\",\"rotation\":0,\"entryId\":5,\"isShowAdvancedOptions\":true,\"fontSize\":1.5,\"isInvisible\":false},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435199950/voice-1j2TYno48FaNfDaaKGrnS5.mp3\",\"script\":\"He thinks his team is too small to win. \",\"fileType\":\"audio/mp3\"},\"x\":0.01,\"y\":0.01,\"width\":11.31,\"height\":9,\"targetId\":\"Answer\"},\"originalX\":0.01,\"originalY\":0.01,\"isTarget\":false,\"style\":{}}],\"originalPosition\":true},{\"targetContext\":{\"id\":\"2\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks the other teams are better listeners.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":8},\"alignment\":\"center\",\"rotation\":0,\"entryId\":7,\"isShowAdvancedOptions\":true,\"fontSize\":1.5},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435207254/voice-vP5MB8MsQDcArgFwcKYFuz.mp3\",\"script\":\"He thinks the other teams are better listeners.\",\"fileType\":\"audio/mp3\"},\"x\":11.8,\"y\":0.01,\"width\":11.14,\"height\":9,\"targetId\":\"\"},\"contents\":[{\"ref\":{\"id\":\"2\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks the other teams are better listeners.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":8},\"alignment\":\"center\",\"rotation\":0,\"entryId\":7,\"isShowAdvancedOptions\":true,\"fontSize\":1.5},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435207254/voice-vP5MB8MsQDcArgFwcKYFuz.mp3\",\"script\":\"He thinks the other teams are better listeners.\",\"fileType\":\"audio/mp3\"},\"x\":11.8,\"y\":0.01,\"width\":11.14,\"height\":9,\"targetId\":\"\"},\"originalX\":11.8,\"originalY\":0.01,\"isTarget\":false,\"style\":{}}],\"originalPosition\":true},{\"targetContext\":{\"id\":\"3\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks there are too many challenges.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":10},\"alignment\":\"center\",\"rotation\":0,\"entryId\":9,\"isShowAdvancedOptions\":true,\"fontSize\":1.5},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435213910/voice-vJ26uX4kWY5vn8jaQ64XdN.mp3\",\"script\":\"He thinks there are too many challenges.\",\"fileType\":\"audio/mp3\"},\"x\":23.69,\"y\":0.01,\"width\":11,\"height\":9,\"targetId\":\"\"},\"contents\":[{\"ref\":{\"id\":\"3\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks there are too many challenges.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":10},\"alignment\":\"center\",\"rotation\":0,\"entryId\":9,\"isShowAdvancedOptions\":true,\"fontSize\":1.5},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435213910/voice-vJ26uX4kWY5vn8jaQ64XdN.mp3\",\"script\":\"He thinks there are too many challenges.\",\"fileType\":\"audio/mp3\"},\"x\":23.69,\"y\":0.01,\"width\":11,\"height\":9,\"targetId\":\"\"},\"originalX\":23.69,\"originalY\":0.01,\"isTarget\":false,\"style\":{}}],\"originalPosition\":true},{\"targetContext\":{\"id\":\"4\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks that older kids are better at challenges.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":12},\"alignment\":\"center\",\"rotation\":0,\"entryId\":11,\"isShowAdvancedOptions\":true,\"fontSize\":1.5,\"lineHeight\":1.11},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435225748/voice-mxJvUo4D2y22ctJaV74bHq.mp3\",\"script\":\"He thinks that older kids are better at challenges.\",\"fileType\":\"audio/mp3\"},\"x\":35.09,\"y\":0.01,\"width\":10.48,\"height\":9,\"targetId\":\"Answer\"},\"contents\":[{\"ref\":{\"id\":\"4\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks that older kids are better at challenges.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":12},\"alignment\":\"center\",\"rotation\":0,\"entryId\":11,\"isShowAdvancedOptions\":true,\"fontSize\":1.5,\"lineHeight\":1.11},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435225748/voice-mxJvUo4D2y22ctJaV74bHq.mp3\",\"script\":\"He thinks that older kids are better at challenges.\",\"fileType\":\"audio/mp3\"},\"x\":35.09,\"y\":0.01,\"width\":10.48,\"height\":9,\"targetId\":\"Answer\"},\"originalX\":35.09,\"originalY\":0.01,\"isTarget\":false,\"style\":{}}],\"originalPosition\":true},{\"targetContext\":{\"id\":\"Answer\",\"element\":{\"simpleList\":{},\"advancedList\":{},\"link\":{}},\"voiceover\":{},\"x\":1.5,\"y\":15,\"width\":19,\"height\":11},\"contents\":[],\"originalPosition\":false},{\"targetContext\":{\"id\":\"Answer\",\"element\":{\"simpleList\":{},\"advancedList\":{},\"link\":{}},\"voiceover\":{},\"x\":25,\"y\":15,\"width\":19,\"height\":11},\"contents\":[],\"originalPosition\":false}],\"entryId\":\"3\"},\"__meta\":{\"isStarted\":true}},\n        \"x2\": {\"3\":{\"type\":\"moveable_dnd\",\"isCorrect\":false,\"isStarted\":true,\"isFilled\":true,\"isResponded\":true,\"score\":0,\"weight\":2,\"scoring_type\":\"AUTO\",\"targets\":[{\"targetContext\":{\"id\":\"1\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks his team is too small to win. \",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":36},\"alignment\":\"center\",\"rotation\":0,\"entryId\":5,\"isShowAdvancedOptions\":true,\"fontSize\":1.5,\"isInvisible\":false},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435199950/voice-1j2TYno48FaNfDaaKGrnS5.mp3\",\"script\":\"He thinks his team is too small to win. \",\"fileType\":\"audio/mp3\"},\"x\":0.01,\"y\":0.01,\"width\":11.31,\"height\":9,\"targetId\":\"Answer\"},\"contents\":[{\"ref\":{\"id\":1,\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks his team is too small to win. \",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":36},\"alignment\":\"center\",\"rotation\":0,\"entryId\":5,\"isShowAdvancedOptions\":true,\"fontSize\":1.5,\"isInvisible\":false},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435199950/voice-1j2TYno48FaNfDaaKGrnS5.mp3\",\"script\":\"He thinks his team is too small to win. \",\"fileType\":\"audio/mp3\"},\"x\":0.01,\"y\":0.01,\"width\":11.31,\"height\":9,\"targetId\":\"Answer\"},\"originalX\":0.01,\"originalY\":0.01,\"isTarget\":false,\"style\":{}}],\"originalPosition\":true},{\"targetContext\":{\"id\":\"2\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks the other teams are better listeners.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":8},\"alignment\":\"center\",\"rotation\":0,\"entryId\":7,\"isShowAdvancedOptions\":true,\"fontSize\":1.5},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435207254/voice-vP5MB8MsQDcArgFwcKYFuz.mp3\",\"script\":\"He thinks the other teams are better listeners.\",\"fileType\":\"audio/mp3\"},\"x\":11.8,\"y\":0.01,\"width\":11.14,\"height\":9,\"targetId\":\"\"},\"contents\":[],\"originalPosition\":true},{\"targetContext\":{\"id\":\"3\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks there are too many challenges.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":10},\"alignment\":\"center\",\"rotation\":0,\"entryId\":9,\"isShowAdvancedOptions\":true,\"fontSize\":1.5},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435213910/voice-vJ26uX4kWY5vn8jaQ64XdN.mp3\",\"script\":\"He thinks there are too many challenges.\",\"fileType\":\"audio/mp3\"},\"x\":23.69,\"y\":0.01,\"width\":11,\"height\":9,\"targetId\":\"\"},\"contents\":[],\"originalPosition\":true},{\"targetContext\":{\"id\":\"4\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks that older kids are better at challenges.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":12},\"alignment\":\"center\",\"rotation\":0,\"entryId\":11,\"isShowAdvancedOptions\":true,\"fontSize\":1.5,\"lineHeight\":1.11},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435225748/voice-mxJvUo4D2y22ctJaV74bHq.mp3\",\"script\":\"He thinks that older kids are better at challenges.\",\"fileType\":\"audio/mp3\"},\"x\":35.09,\"y\":0.01,\"width\":10.48,\"height\":9,\"targetId\":\"Answer\"},\"contents\":[{\"ref\":{\"id\":\"4\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks that older kids are better at challenges.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":12},\"alignment\":\"center\",\"rotation\":0,\"entryId\":11,\"isShowAdvancedOptions\":true,\"fontSize\":1.5,\"lineHeight\":1.11},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435225748/voice-mxJvUo4D2y22ctJaV74bHq.mp3\",\"script\":\"He thinks that older kids are better at challenges.\",\"fileType\":\"audio/mp3\"},\"x\":35.09,\"y\":0.01,\"width\":10.48,\"height\":9,\"targetId\":\"Answer\"},\"originalX\":35.09,\"originalY\":0.01,\"isTarget\":false,\"style\":{}}],\"originalPosition\":true},{\"targetContext\":{\"id\":\"Answer\",\"element\":{\"simpleList\":{},\"advancedList\":{},\"link\":{}},\"voiceover\":{},\"x\":1.5,\"y\":15,\"width\":19,\"height\":11},\"contents\":[{\"ref\":{\"id\":\"2\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks the other teams are better listeners.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":8},\"alignment\":\"center\",\"rotation\":0,\"entryId\":7,\"isShowAdvancedOptions\":true,\"fontSize\":1.5},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435207254/voice-vP5MB8MsQDcArgFwcKYFuz.mp3\",\"script\":\"He thinks the other teams are better listeners.\",\"fileType\":\"audio/mp3\"},\"x\":11.8,\"y\":0.01,\"width\":11.14,\"height\":9,\"targetId\":\"\"},\"originalX\":11.8,\"originalY\":0.01,\"isTarget\":false,\"style\":{}}],\"originalPosition\":false},{\"targetContext\":{\"id\":\"Answer\",\"element\":{\"simpleList\":{},\"advancedList\":{},\"link\":{}},\"voiceover\":{},\"x\":25,\"y\":15,\"width\":19,\"height\":11},\"contents\":[{\"ref\":{\"id\":\"3\",\"element\":{\"elementType\":\"text\",\"caption\":\"He thinks there are too many challenges.\",\"simpleList\":[],\"advancedList\":[],\"paragraphStyle\":\"regular\",\"link\":{\"elementType\":\"text_link\",\"caption\":\"\",\"entryId\":10},\"alignment\":\"center\",\"rotation\":0,\"entryId\":9,\"isShowAdvancedOptions\":true,\"fontSize\":1.5},\"voiceover\":{\"url\":\"https://s3.ca-central-1.amazonaws.com/authoring.mathproficiencytest.ca/voice_uploads/6348/1642435213910/voice-vJ26uX4kWY5vn8jaQ64XdN.mp3\",\"script\":\"He thinks there are too many challenges.\",\"fileType\":\"audio/mp3\"},\"x\":23.69,\"y\":0.01,\"width\":11,\"height\":9,\"targetId\":\"\"},\"originalX\":23.69,\"originalY\":0.01,\"isTarget\":false,\"style\":{}}],\"originalPosition\":false}],\"isKeyIdUsed\":false,\"simplifiedStateTargets\":[{\"id\":\"Answer\",\"contents\":[{\"id\":\"2\"}]},{\"id\":\"Answer\",\"contents\":[{\"id\":\"3\"}]}],\"entryId\":\"3\"},\"__meta\":{\"isStarted\":true}},\n        \"hideUnchanged\": true,\n        \"formatter\": \"html\",\n        \"objectHash\": \"null\"\n      }\n","evals":[],"jsHooks":[]}</script>
+<script type="application/htmlwidget-sizing" data-for="htmlwidget-42d3b68baa02e32e799b">{"viewer":{"width":450,"height":350,"padding":0,"fill":true},"browser":{"width":960,"height":500,"padding":0,"fill":true}}</script>
+</body>
+</html>
