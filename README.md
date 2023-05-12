@@ -10,6 +10,6 @@ For level 2 one csv file - discrepant_data.csv(show the discrepant data)
 - 3 html files shows the difference between json files which shows the difference between condition satisfied and not satisfied ones
 - Level_2.R shows the my work in R
 
-For level 3 one python file - Level_2.ipynb
+For level 3 one python file - Level_3.ipynb
 
 Devika Sunil - Vretta Assessment_All Levels Findings .docx - Explains all findings for all levels
